@@ -6,8 +6,9 @@ QQ Official replay-oriented resolver plugin for AstrBot.
 
 This repository is being built in slices.
 
-- Slice A delivers the plugin skeleton, runtime configuration, and QQ Official message listener entrypoint.
-- Resolver logic, resource analysis, merged-forward handling, and tests land in later slices.
+- Slice A delivered the plugin skeleton, runtime configuration, and QQ Official message listener entrypoint.
+- Slice B delivered replay models, resource analysis, merged-forward summaries, and QQ Official capability-aware chunk planning.
+- Slice C remains open for fake-object tests and verification commands.
 
 ## Supports
 

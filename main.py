@@ -7,8 +7,9 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
 from chat_work_balance import ChatWorkBalanceConfig
-from chat_work_balance.resolvers import QQChannelMessageResolver
-from chat_work_balance.services import MergedForwardReader, ResourceAnalysisService
+from chat_work_balance.resolvers.qq_channel_message_resolver import QQChannelMessageResolver
+from chat_work_balance.services.merged_forward_reader import MergedForwardReader
+from chat_work_balance.services.resource_analysis_service import ResourceAnalysisService
 
 
 @register(
