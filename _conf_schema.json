@@ -1,0 +1,8 @@
+{
+  "image_analysis_provider_id": {
+    "type": "string",
+    "_special": "select_provider",
+    "description": "Image analysis provider",
+    "default": ""
+  }
+}
