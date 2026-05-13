@@ -28,8 +28,8 @@ from ..services.resource_analysis_service import ResourceAnalysisService
 _PLUGIN_NAME = "chat_work_balance"
 
 
-class QQChannelMessageResolver:
-    """Resolve full QQ Official message chains into replay-safe chunks."""
+class OneBotMessageResolver:
+    """Resolve full OneBot message chains into replay-safe chunks."""
 
     def __init__(
         self,
@@ -276,17 +276,21 @@ class QQChannelMessageResolver:
                 append_text_chunk(forward_summary, source_index=index)
                 continue
 
-            placeholder = f"Unsupported component preserved as text: {type(component).__name__}"
-            segments.append(
-                ResolvedSegment(
-                    kind="unknown",
-                    summary=placeholder,
-                    payload=component,
-                    source_index=index,
-                    replayable=True,
-                )
+            segment = ResolvedSegment(
+                kind="unknown",
+                summary=f"Unsupported component dropped: {type(component).__name__}",
+                payload=component,
+                source_index=index,
+                replayable=False,
             )
-            append_text_chunk(placeholder, source_index=index)
+            segments.append(segment)
+            dropped_segments.append(segment)
+            self._log_dropped_segment(
+                unified_msg_origin=unified_msg_origin,
+                message_id=message_id,
+                platform=platform,
+                segment=segment,
+            )
 
         await flush_text_buffer()
 
