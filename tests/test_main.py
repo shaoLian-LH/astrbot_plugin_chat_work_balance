@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # pyright: reportMissingImports=false
 
+import ast
 import importlib
 import importlib.util
 import sys
@@ -9,11 +10,15 @@ import types
 from pathlib import Path
 from typing import cast
 
+from astrbot.api.event import filter as event_filter
 from astrbot.core.message.components import Plain
 
 from chat_work_balance.models import ReplayChunk, ReplayPlan, ResolvedMessage
 from chat_work_balance.resolvers.qq_channel_message_resolver import QQChannelMessageResolver
 from tests.helpers import FakeContext, FakeEvent, collect_async, run_async
+
+setattr(event_filter.PlatformAdapterType, "QQOFFICIAL", 1)
+setattr(event_filter.PlatformAdapterType, "QQOFFICIAL_WEBHOOK", 2)
 
 
 def _load_plugin_main_module():
@@ -42,6 +47,7 @@ def _load_plugin_main_module():
 
 
 main = _load_plugin_main_module()
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
 
 class StubResolver:
@@ -62,6 +68,47 @@ class StubResolver:
 def test_plugin_main_imports_under_package_context() -> None:
     assert main.__name__ == "data.plugins.chat_work_balance.main"
     assert main.ChatWorkBalancePlugin.__module__ == "data.plugins.chat_work_balance.main"
+
+
+def test_on_message_registers_dual_qq_official_platform_filter() -> None:
+    module_ast = ast.parse((PLUGIN_ROOT / "main.py").read_text(encoding="utf-8"))
+    class_node = next(
+        node
+        for node in module_ast.body
+        if isinstance(node, ast.ClassDef) and node.name == "ChatWorkBalancePlugin"
+    )
+    on_message_node = next(
+        node
+        for node in class_node.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "on_message"
+    )
+    platform_decorator = next(
+        decorator
+        for decorator in on_message_node.decorator_list
+        if isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Attribute)
+        and decorator.func.attr == "platform_adapter_type"
+    )
+    platform_argument = platform_decorator.args[0]
+
+    assert isinstance(platform_argument, ast.BinOp)
+    assert isinstance(platform_argument.op, ast.BitOr)
+    assert ast.unparse(platform_argument.left) == "filter.PlatformAdapterType.QQOFFICIAL"
+    assert ast.unparse(platform_argument.right) == "filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK"
+
+
+def test_metadata_declares_dual_qq_official_support() -> None:
+    metadata_lines = (PLUGIN_ROOT / "metadata.yaml").read_text(encoding="utf-8").splitlines()
+    support_platforms = [
+        line.strip()[2:]
+        for line in metadata_lines
+        if line.startswith("  - ")
+    ]
+
+    assert support_platforms == [
+        "qq_official",
+        "qq_official_webhook",
+    ]
 
 
 def test_on_message_replays_all_chunks_and_stops_event(monkeypatch) -> None:
