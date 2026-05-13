@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # pyright: reportMissingImports=false
 
-from typing import Iterable
+from typing import Iterable, Literal
 
 from astrbot.api.event import AstrMessageEvent
 from astrbot.core.message.components import (
@@ -53,12 +53,35 @@ class QQChannelMessageResolver:
             chunks.append(
                 ReplayChunk(
                     chain=list(text_buffer),
+                    intent="text",
                     source_indexes=tuple(text_indexes),
                     summary=self._join_plain_text(text_buffer),
                 )
             )
             text_buffer = []
             text_indexes = []
+
+        def append_text_chunk(text: str, *, source_index: int) -> None:
+            if not text:
+                return
+            text_buffer.append(Plain(text))
+            text_indexes.append(source_index)
+
+        def append_media_chunk(
+            component: BaseMessageComponent,
+            *,
+            intent: Literal["image", "file", "record", "video"],
+            source_index: int,
+            summary: str,
+        ) -> None:
+            chunks.append(
+                ReplayChunk(
+                    chain=[component],
+                    intent=intent,
+                    source_indexes=(source_index,),
+                    summary=summary,
+                )
+            )
 
         for index, component in enumerate(message_chain):
             if isinstance(component, Plain):
@@ -72,9 +95,7 @@ class QQChannelMessageResolver:
                         replayable=True,
                     )
                 )
-                if text:
-                    text_buffer.append(Plain(text))
-                    text_indexes.append(index)
+                append_text_chunk(text, source_index=index)
                 continue
 
             if isinstance(component, Image):
@@ -89,12 +110,11 @@ class QQChannelMessageResolver:
                         replayable=True,
                     )
                 )
-                chunks.append(
-                    ReplayChunk(
-                        chain=[component],
-                        source_indexes=(index,),
-                        summary=image_summary,
-                    )
+                append_media_chunk(
+                    component,
+                    intent="image",
+                    source_index=index,
+                    summary=image_summary,
                 )
                 analysis = await self._resource_analysis_service.analyze_image(
                     component,
@@ -113,8 +133,7 @@ class QQChannelMessageResolver:
                     },
                 )
                 segments.append(analysis_segment)
-                text_buffer.append(Plain(analysis.text))
-                text_indexes.append(index)
+                append_text_chunk(analysis.text, source_index=index)
                 continue
 
             if isinstance(component, File):
@@ -130,12 +149,11 @@ class QQChannelMessageResolver:
                         metadata=metadata,
                     )
                 )
-                chunks.append(
-                    ReplayChunk(
-                        chain=[replay_file],
-                        source_indexes=(index,),
-                        summary=summary,
-                    )
+                append_media_chunk(
+                    replay_file,
+                    intent="file",
+                    source_index=index,
+                    summary=summary,
                 )
                 continue
 
@@ -151,8 +169,11 @@ class QQChannelMessageResolver:
                         replayable=True,
                     )
                 )
-                chunks.append(
-                    ReplayChunk(chain=[component], source_indexes=(index,), summary=summary)
+                append_media_chunk(
+                    component,
+                    intent="record",
+                    source_index=index,
+                    summary=summary,
                 )
                 continue
 
@@ -168,8 +189,11 @@ class QQChannelMessageResolver:
                         replayable=True,
                     )
                 )
-                chunks.append(
-                    ReplayChunk(chain=[component], source_indexes=(index,), summary=summary)
+                append_media_chunk(
+                    component,
+                    intent="video",
+                    source_index=index,
+                    summary=summary,
                 )
                 continue
 
@@ -225,8 +249,7 @@ class QQChannelMessageResolver:
                         replayable=True,
                     )
                 )
-                text_buffer.append(Plain(forward_summary))
-                text_indexes.append(index)
+                append_text_chunk(forward_summary, source_index=index)
                 continue
 
             placeholder = f"Unsupported component preserved as text: {type(component).__name__}"
@@ -239,8 +262,7 @@ class QQChannelMessageResolver:
                     replayable=True,
                 )
             )
-            text_buffer.append(Plain(placeholder))
-            text_indexes.append(index)
+            append_text_chunk(placeholder, source_index=index)
 
         await flush_text_buffer()
 

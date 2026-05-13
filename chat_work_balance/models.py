@@ -29,6 +29,7 @@ class ResolvedSegment:
 @dataclass(frozen=True)
 class ReplayChunk:
     chain: list[Any]
+    intent: Literal["text", "image", "file", "record", "video"] = "text"
     source_indexes: tuple[int, ...] = ()
     summary: str = ""
 
