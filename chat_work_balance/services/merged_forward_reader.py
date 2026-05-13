@@ -19,7 +19,7 @@ from astrbot.core.message.components import (
     Video,
 )
 
-from chat_work_balance.services.resource_analysis_service import ResourceAnalysisService
+from .resource_analysis_service import ResourceAnalysisService
 
 
 class MergedForwardReader:

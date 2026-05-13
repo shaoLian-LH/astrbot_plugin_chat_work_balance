@@ -20,9 +20,9 @@ from astrbot.core.message.components import (
     Video,
 )
 
-from chat_work_balance.models import ReplayChunk, ReplayPlan, ResolvedMessage, ResolvedSegment
-from chat_work_balance.services.merged_forward_reader import MergedForwardReader
-from chat_work_balance.services.resource_analysis_service import ResourceAnalysisService
+from ..models import ReplayChunk, ReplayPlan, ResolvedMessage, ResolvedSegment
+from ..services.merged_forward_reader import MergedForwardReader
+from ..services.resource_analysis_service import ResourceAnalysisService
 
 
 class QQChannelMessageResolver:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from chat_work_balance.models import ReplayPlan, ResolvedMessage
+from ..models import ReplayPlan, ResolvedMessage
 
 
 class QQChannelMessageResolver:

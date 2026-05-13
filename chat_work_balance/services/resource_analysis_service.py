@@ -9,7 +9,7 @@ from astrbot.api.star import Context
 from astrbot.core.message.components import Image
 from astrbot.core.provider.provider import Provider
 
-from chat_work_balance.config import ChatWorkBalanceConfig
+from ..config import ChatWorkBalanceConfig
 
 
 @dataclass(frozen=True)
