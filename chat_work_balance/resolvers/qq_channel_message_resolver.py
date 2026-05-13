@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Iterable, Literal
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.core.message.components import (
     At,
@@ -24,6 +25,8 @@ from ..models import ReplayChunk, ReplayPlan, ResolvedMessage, ResolvedSegment
 from ..services.merged_forward_reader import MergedForwardReader
 from ..services.resource_analysis_service import ResourceAnalysisService
 
+_PLUGIN_NAME = "chat_work_balance"
+
 
 class QQChannelMessageResolver:
     """Resolve full QQ Official message chains into replay-safe chunks."""
@@ -38,6 +41,9 @@ class QQChannelMessageResolver:
 
     async def resolve(self, event: AstrMessageEvent) -> ResolvedMessage:
         message_obj = getattr(event, "message_obj", None)
+        message_id = str(getattr(message_obj, "message_id", "")) or "<unknown>"
+        unified_msg_origin = str(getattr(event, "unified_msg_origin", "")) or "<unknown>"
+        platform = self._resolve_platform(unified_msg_origin)
         message_chain = getattr(message_obj, "message", None) or []
         segments: list[ResolvedSegment] = []
         chunks: list[ReplayChunk] = []
@@ -207,6 +213,12 @@ class QQChannelMessageResolver:
                 )
                 segments.append(segment)
                 dropped_segments.append(segment)
+                self._log_dropped_segment(
+                    unified_msg_origin=unified_msg_origin,
+                    message_id=message_id,
+                    platform=platform,
+                    segment=segment,
+                )
                 continue
 
             if isinstance(component, Face):
@@ -219,6 +231,12 @@ class QQChannelMessageResolver:
                 )
                 segments.append(segment)
                 dropped_segments.append(segment)
+                self._log_dropped_segment(
+                    unified_msg_origin=unified_msg_origin,
+                    message_id=message_id,
+                    platform=platform,
+                    segment=segment,
+                )
                 continue
 
             if isinstance(component, Reply):
@@ -231,6 +249,12 @@ class QQChannelMessageResolver:
                 )
                 segments.append(segment)
                 dropped_segments.append(segment)
+                self._log_dropped_segment(
+                    unified_msg_origin=unified_msg_origin,
+                    message_id=message_id,
+                    platform=platform,
+                    segment=segment,
+                )
                 continue
 
             if isinstance(component, (Forward, Node, Nodes)):
@@ -267,6 +291,18 @@ class QQChannelMessageResolver:
         await flush_text_buffer()
 
         replay_plan = ReplayPlan(chunks=chunks, dropped_segments=dropped_segments)
+        logger.info(
+            self._format_observable_log(
+                "message_resolved",
+                unified_msg_origin=unified_msg_origin,
+                message_id=message_id,
+                platform=platform,
+                component_names=",".join(type(component).__name__ for component in message_chain) or "<none>",
+                segment_count=str(len(segments)),
+                chunk_count=str(len(replay_plan.chunks)),
+                dropped_count=str(len(replay_plan.dropped_segments)),
+            )
+        )
         return ResolvedMessage(
             log_summary=self._build_log_summary(event, message_chain, segments, replay_plan),
             segments=segments,
@@ -333,7 +369,9 @@ class QQChannelMessageResolver:
             and segment.metadata.get("success") == "false"
         ]
         return (
-            f"QQ Official resolve summary: source={event.unified_msg_origin} "
+            f"plugin={_PLUGIN_NAME} stage=message_resolved_summary "
+            f"platform={self._resolve_platform(event.unified_msg_origin)} "
+            f"unified_msg_origin={event.unified_msg_origin} "
             f"message_id={message_id or '<unknown>'} "
             f"components={component_names} "
             f"chunks={len(replay_plan.chunks)} "
@@ -357,3 +395,56 @@ class QQChannelMessageResolver:
     @staticmethod
     def _join_plain_text(components: list[Plain]) -> str:
         return "".join(component.text for component in components)
+
+    def _log_dropped_segment(
+        self,
+        *,
+        unified_msg_origin: str,
+        message_id: str,
+        platform: str,
+        segment: ResolvedSegment,
+    ) -> None:
+        logger.warning(
+            self._format_observable_log(
+                "dropped_segment",
+                unified_msg_origin=unified_msg_origin,
+                message_id=message_id,
+                platform=platform,
+                segment_kind=segment.kind,
+                source_index=str(segment.source_index),
+                detail=self._shorten(segment.summary),
+            )
+        )
+
+    @staticmethod
+    def _format_observable_log(
+        stage: str,
+        *,
+        unified_msg_origin: str,
+        message_id: str,
+        platform: str,
+        **fields: str,
+    ) -> str:
+        parts = [
+            f"plugin={_PLUGIN_NAME}",
+            f"stage={stage}",
+            f"platform={platform}",
+            f"unified_msg_origin={unified_msg_origin}",
+            f"message_id={message_id}",
+        ]
+        for key, value in fields.items():
+            parts.append(f"{key}={value}")
+        return " ".join(parts)
+
+    @staticmethod
+    def _resolve_platform(unified_msg_origin: str) -> str:
+        if not unified_msg_origin:
+            return "<unknown>"
+        return unified_msg_origin.split(":", 1)[0] or "<unknown>"
+
+    @staticmethod
+    def _shorten(text: str, limit: int = 160) -> str:
+        compact = " ".join(text.split())
+        if len(compact) <= limit:
+            return compact
+        return f"{compact[: limit - 3]}..."

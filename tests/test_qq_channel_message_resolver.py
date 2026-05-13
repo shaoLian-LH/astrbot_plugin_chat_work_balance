@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # pyright: reportMissingImports=false
 
+import types
 from typing import cast
 
 from astrbot.core.message.components import At, Face, File, Forward, Image, Node, Nodes, Plain, Record, Reply, Video
@@ -78,6 +79,7 @@ def test_resolve_plain_text_keeps_original_text_and_log_context() -> None:
     assert [item.text for item in resolved.replay_plan.chunks[0].chain] == ["hello", " world"]
     assert resolved.replay_plan.chunks[0].source_indexes == (0, 1)
     assert resolved.replay_plan.chunks[0].summary == "hello world"
+    assert "plugin=chat_work_balance stage=message_resolved_summary" in resolved.log_summary
     assert "message_id=msg-text" in resolved.log_summary
     assert "components=['Plain', 'Plain']" in resolved.log_summary
 
@@ -245,8 +247,18 @@ def test_resolve_dropped_segments_stay_observable_alongside_supported_text() -> 
         ],
         message_id="msg-dropped",
     )
+    log_recorder = types.SimpleNamespace(info=[], warning=[])
+    from chat_work_balance.resolvers import qq_channel_message_resolver as resolver_module
 
-    resolved = run_async(resolver.resolve(event))
+    original_logger = resolver_module.logger
+    resolver_module.logger = types.SimpleNamespace(
+        info=lambda message: log_recorder.info.append(message),
+        warning=lambda message: log_recorder.warning.append(message),
+    )
+    try:
+        resolved = run_async(resolver.resolve(event))
+    finally:
+        resolver_module.logger = original_logger
 
     assert [segment.kind for segment in resolved.segments] == [
         "plain",
@@ -271,6 +283,14 @@ def test_resolve_dropped_segments_stay_observable_alongside_supported_text() -> 
     assert resolved.replay_plan.chunks[0].summary == "hello world"
     assert resolved.replay_plan.chunks[0].source_indexes == (0, 4)
     assert "dropped=['At mention skipped: 12345', 'Face emoji skipped in replay.', 'Reply reference skipped: reply-1']" in resolved.log_summary
+    assert len(log_recorder.warning) == 3
+    assert all("stage=dropped_segment" in message for message in log_recorder.warning)
+    assert any("segment_kind=at" in message and "message_id=msg-dropped" in message for message in log_recorder.warning)
+    assert any("segment_kind=face" in message for message in log_recorder.warning)
+    assert any("segment_kind=reply" in message for message in log_recorder.warning)
+    assert len(log_recorder.info) == 1
+    assert "stage=message_resolved" in log_recorder.info[0]
+    assert "dropped_count=3" in log_recorder.info[0]
 
 
 def test_resolve_image_failure_still_replays_image_and_following_file() -> None:
