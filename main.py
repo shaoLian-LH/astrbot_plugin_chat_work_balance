@@ -7,7 +7,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 
 from .chat_work_balance import ChatWorkBalanceConfig
-from .chat_work_balance.resolvers.qq_channel_message_resolver import QQChannelMessageResolver
+from .chat_work_balance.resolvers.onebot_message_resolver import OneBotMessageResolver
 from .chat_work_balance.services.merged_forward_reader import MergedForwardReader
 from .chat_work_balance.services.resource_analysis_service import ResourceAnalysisService
 
@@ -17,7 +17,7 @@ _PLUGIN_NAME = "chat_work_balance"
 @register(
     "chat_work_balance",
     "xuemufan",
-    "QQ Official message resolver skeleton for replay-oriented diagnostics.",
+    "OneBot message resolver for replay-oriented diagnostics.",
     "0.0.1",
 )
 class ChatWorkBalancePlugin(Star):
@@ -29,7 +29,7 @@ class ChatWorkBalancePlugin(Star):
             context=context,
             plugin_config=plugin_config,
         )
-        self._resolver = QQChannelMessageResolver(
+        self._resolver = OneBotMessageResolver(
             merged_forward_reader=merged_forward_reader,
             resource_analysis_service=resource_analysis_service,
         )
@@ -38,14 +38,11 @@ class ChatWorkBalancePlugin(Star):
                 "plugin_init",
                 unified_msg_origin="<startup>",
                 message_id="<startup>",
-                platform="qq_official|qq_official_webhook",
+                platform="aiocqhttp",
             )
         )
 
-    @filter.platform_adapter_type(
-        filter.PlatformAdapterType.QQOFFICIAL
-        | filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK
-    )
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         message_obj = getattr(event, "message_obj", None)

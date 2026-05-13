@@ -1,13 +1,13 @@
 # Chat Work Balance
 
-QQ Official replay-oriented resolver plugin for AstrBot.
+OneBot / aiocqhttp replay-oriented resolver plugin for AstrBot.
 
 ## Current status
 
 This repository is being built in slices.
 
-- Slice A delivered the plugin skeleton, runtime configuration, and QQ Official message listener entrypoint.
-- Slice B delivered replay models, resource analysis, merged-forward summaries, and QQ Official capability-aware chunk planning.
+- Slice A delivered the plugin skeleton, runtime configuration, and OneBot message listener entrypoint.
+- Slice B delivered replay models, resource analysis, merged-forward summaries, and OneBot capability-aware chunk planning.
 - Slice C delivered fake-object tests and `uv`-based verification commands.
 
 ## Supports

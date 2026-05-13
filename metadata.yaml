@@ -1,9 +1,8 @@
 name: chat_work_balance
 display_name: Chat Work Balance
-desc: QQ Official message resolver skeleton for replay-oriented diagnostics.
+desc: OneBot message resolver for replay-oriented diagnostics.
 version: v0.0.1
 author: xuemufan
 repo: https://github.com/xuemufan/astrbot_plugin_chat_work_balance
 support_platforms:
-  - qq_official
-  - qq_official_webhook
+  - aiocqhttp
