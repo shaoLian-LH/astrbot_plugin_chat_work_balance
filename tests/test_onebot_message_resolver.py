@@ -7,7 +7,7 @@ from typing import cast
 
 from astrbot.core.message.components import At, Face, File, Forward, Image, Node, Nodes, Plain, Record, Reply, Video
 
-from chat_work_balance.resolvers.qq_channel_message_resolver import QQChannelMessageResolver
+from chat_work_balance.resolvers.onebot_message_resolver import OneBotMessageResolver
 from chat_work_balance.services.merged_forward_reader import MergedForwardReader
 from chat_work_balance.services.resource_analysis_service import ResourceAnalysisResult, ResourceAnalysisService
 from tests.helpers import FakeEvent, run_async
@@ -57,10 +57,10 @@ def _build_resolver(
     *,
     analysis_results: list[ResourceAnalysisResult],
     forward_summary: str = "Forward summary line",
-) -> tuple[QQChannelMessageResolver, StubResourceAnalysisService, StubMergedForwardReader]:
+) -> tuple[OneBotMessageResolver, StubResourceAnalysisService, StubMergedForwardReader]:
     analysis_service = StubResourceAnalysisService(analysis_results)
     forward_reader = StubMergedForwardReader(summary=forward_summary)
-    resolver = QQChannelMessageResolver(
+    resolver = OneBotMessageResolver(
         merged_forward_reader=cast(MergedForwardReader, forward_reader),
         resource_analysis_service=cast(ResourceAnalysisService, analysis_service),
     )
@@ -80,6 +80,8 @@ def test_resolve_plain_text_keeps_original_text_and_log_context() -> None:
     assert resolved.replay_plan.chunks[0].source_indexes == (0, 1)
     assert resolved.replay_plan.chunks[0].summary == "hello world"
     assert "plugin=chat_work_balance stage=message_resolved_summary" in resolved.log_summary
+    assert "platform=aiocqhttp" in resolved.log_summary
+    assert "unified_msg_origin=aiocqhttp:group:1" in resolved.log_summary
     assert "message_id=msg-text" in resolved.log_summary
     assert "components=['Plain', 'Plain']" in resolved.log_summary
 
@@ -118,7 +120,7 @@ def test_resolve_image_analysis_text_isolated_from_media_chunks() -> None:
     ]
     assert analysis_service.calls == [
         {
-            "unified_msg_origin": "qq_official:channel:1",
+            "unified_msg_origin": "aiocqhttp:group:1",
             "source_label": "message:msg-image-analysis#1",
         }
     ]
@@ -185,11 +187,11 @@ def test_resolve_multi_rich_media_enforces_single_media_intent_per_chunk() -> No
     ]
     assert analysis_service.calls == [
         {
-            "unified_msg_origin": "qq_official:channel:1",
+            "unified_msg_origin": "aiocqhttp:group:1",
             "source_label": "message:msg-rich#1",
         },
         {
-            "unified_msg_origin": "qq_official:channel:1",
+            "unified_msg_origin": "aiocqhttp:group:1",
             "source_label": "message:msg-rich#5",
         },
     ]
@@ -248,7 +250,7 @@ def test_resolve_dropped_segments_stay_observable_alongside_supported_text() -> 
         message_id="msg-dropped",
     )
     log_recorder = types.SimpleNamespace(info=[], warning=[])
-    from chat_work_balance.resolvers import qq_channel_message_resolver as resolver_module
+    from chat_work_balance.resolvers import onebot_message_resolver as resolver_module
 
     original_logger = resolver_module.logger
     resolver_module.logger = types.SimpleNamespace(

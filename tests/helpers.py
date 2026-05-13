@@ -56,7 +56,7 @@ class FakeEvent:
         message: list[object],
         *,
         message_id: str = "msg-1",
-        unified_msg_origin: str = "qq_official:channel:1",
+        unified_msg_origin: str = "aiocqhttp:group:1",
     ) -> None:
         self.message_obj = types.SimpleNamespace(message=message, message_id=message_id)
         self.unified_msg_origin = unified_msg_origin

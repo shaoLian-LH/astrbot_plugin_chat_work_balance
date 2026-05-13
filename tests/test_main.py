@@ -15,7 +15,7 @@ from astrbot.core.message.components import Image, Plain
 
 from chat_work_balance.config import ChatWorkBalanceConfig
 from chat_work_balance.models import ReplayChunk, ReplayPlan, ResolvedMessage
-from chat_work_balance.resolvers.qq_channel_message_resolver import QQChannelMessageResolver
+from chat_work_balance.resolvers.onebot_message_resolver import OneBotMessageResolver
 from chat_work_balance.services.merged_forward_reader import MergedForwardReader
 from chat_work_balance.services import resource_analysis_service as resource_analysis_service_module
 from chat_work_balance.services.resource_analysis_service import (
@@ -24,8 +24,7 @@ from chat_work_balance.services.resource_analysis_service import (
 )
 from tests.helpers import FakeContext, FakeEvent, FakeProvider, collect_async, run_async
 
-setattr(event_filter.PlatformAdapterType, "QQOFFICIAL", 1)
-setattr(event_filter.PlatformAdapterType, "QQOFFICIAL_WEBHOOK", 2)
+setattr(event_filter.PlatformAdapterType, "AIOCQHTTP", "aiocqhttp")
 
 
 def _load_plugin_main_module():
@@ -101,7 +100,7 @@ def test_plugin_main_imports_under_package_context() -> None:
     assert main.ChatWorkBalancePlugin.__module__ == "data.plugins.chat_work_balance.main"
 
 
-def test_on_message_registers_dual_qq_official_platform_filter() -> None:
+def test_on_message_registers_aiocqhttp_platform_filter() -> None:
     module_ast = ast.parse((PLUGIN_ROOT / "main.py").read_text(encoding="utf-8"))
     class_node = next(
         node
@@ -122,13 +121,10 @@ def test_on_message_registers_dual_qq_official_platform_filter() -> None:
     )
     platform_argument = platform_decorator.args[0]
 
-    assert isinstance(platform_argument, ast.BinOp)
-    assert isinstance(platform_argument.op, ast.BitOr)
-    assert ast.unparse(platform_argument.left) == "filter.PlatformAdapterType.QQOFFICIAL"
-    assert ast.unparse(platform_argument.right) == "filter.PlatformAdapterType.QQOFFICIAL_WEBHOOK"
+    assert ast.unparse(platform_argument) == "filter.PlatformAdapterType.AIOCQHTTP"
 
 
-def test_metadata_declares_dual_qq_official_support() -> None:
+def test_metadata_declares_aiocqhttp_support() -> None:
     metadata_lines = (PLUGIN_ROOT / "metadata.yaml").read_text(encoding="utf-8").splitlines()
     support_platforms = [
         line.strip()[2:]
@@ -136,13 +132,10 @@ def test_metadata_declares_dual_qq_official_support() -> None:
         if line.startswith("  - ")
     ]
 
-    assert support_platforms == [
-        "qq_official",
-        "qq_official_webhook",
-    ]
+    assert support_platforms == ["aiocqhttp"]
 
 
-def test_on_message_replays_all_chunks_and_stops_event(monkeypatch) -> None:
+def test_on_message_replays_all_chunks_and_stops_group_event(monkeypatch) -> None:
     log_recorder = types.SimpleNamespace(info=[], exception=[])
     monkeypatch.setattr(
         main,
@@ -154,12 +147,12 @@ def test_on_message_replays_all_chunks_and_stops_event(monkeypatch) -> None:
     )
     plugin = main.ChatWorkBalancePlugin(FakeContext(), {})
     plugin._resolver = cast(
-        QQChannelMessageResolver,
+        OneBotMessageResolver,
         StubResolver(
             result=ResolvedMessage(
                 log_summary=(
                     "plugin=chat_work_balance stage=message_resolved_summary "
-                    "platform=qq_official unified_msg_origin=qq_official:channel:1 "
+                    "platform=aiocqhttp unified_msg_origin=aiocqhttp:group:1 "
                     "message_id=msg-main"
                 ),
                 replay_plan=ReplayPlan(
@@ -198,7 +191,7 @@ def test_on_message_success_path_includes_real_resolver_stage_logs(monkeypatch) 
         exception=lambda message: log_recorder.exception.append(message),
     )
     monkeypatch.setattr(main, "logger", shared_logger)
-    from chat_work_balance.resolvers import qq_channel_message_resolver as resolver_module
+    from chat_work_balance.resolvers import onebot_message_resolver as resolver_module
 
     monkeypatch.setattr(resolver_module, "logger", shared_logger)
     monkeypatch.setattr(resource_analysis_service_module, "logger", shared_logger)
@@ -213,7 +206,7 @@ def test_on_message_success_path_includes_real_resolver_stage_logs(monkeypatch) 
         providers={"provider-1": provider},
     )
     plugin = main.ChatWorkBalancePlugin(context, {})
-    plugin._resolver = QQChannelMessageResolver(
+    plugin._resolver = OneBotMessageResolver(
         merged_forward_reader=cast(MergedForwardReader, StubMergedForwardReader()),
         resource_analysis_service=ResourceAnalysisService(
             context=context,
@@ -281,6 +274,106 @@ def test_on_message_success_path_includes_real_resolver_stage_logs(monkeypatch) 
     assert log_recorder.exception == []
 
 
+def test_on_message_private_success_path_replays_chunks_and_uses_private_origin(monkeypatch) -> None:
+    log_recorder = types.SimpleNamespace(info=[], exception=[])
+    monkeypatch.setattr(
+        main,
+        "logger",
+        types.SimpleNamespace(
+            info=lambda message: log_recorder.info.append(message),
+            exception=lambda message: log_recorder.exception.append(message),
+        ),
+    )
+    plugin = main.ChatWorkBalancePlugin(FakeContext(), {})
+    plugin._resolver = cast(
+        OneBotMessageResolver,
+        StubResolver(
+            result=ResolvedMessage(
+                log_summary=(
+                    "plugin=chat_work_balance stage=message_resolved_summary "
+                    "platform=aiocqhttp unified_msg_origin=aiocqhttp:private:1 "
+                    "message_id=msg-private"
+                ),
+                replay_plan=ReplayPlan(
+                    chunks=[
+                        ReplayChunk(chain=[Plain("private first")], source_indexes=(0,), summary="private first"),
+                        ReplayChunk(chain=[Plain("private second")], source_indexes=(1,), summary="private second"),
+                    ]
+                ),
+            )
+        ),
+    )
+    event = FakeEvent(
+        [],
+        message_id="msg-private",
+        unified_msg_origin="aiocqhttp:private:1",
+    )
+
+    results = run_async(collect_async(plugin.on_message(event)))
+
+    assert results == [
+        {"type": "chain", "chain": [Plain("private first")]},
+        {"type": "chain", "chain": [Plain("private second")]},
+    ]
+    assert event.chain_calls == [[Plain("private first")], [Plain("private second")]]
+    assert event.stopped == 1
+    assert any(
+        "stage=message_received" in message
+        and "message_id=msg-private" in message
+        and "unified_msg_origin=aiocqhttp:private:1" in message
+        for message in log_recorder.info
+    )
+    assert any(
+        "stage=message_completed" in message
+        and "message_id=msg-private" in message
+        and "chunk_count=2" in message
+        for message in log_recorder.info
+    )
+    assert log_recorder.exception == []
+
+
+def test_on_message_stops_event_without_output_when_resolver_returns_empty_plan(monkeypatch) -> None:
+    log_recorder = types.SimpleNamespace(info=[], exception=[])
+    monkeypatch.setattr(
+        main,
+        "logger",
+        types.SimpleNamespace(
+            info=lambda message: log_recorder.info.append(message),
+            exception=lambda message: log_recorder.exception.append(message),
+        ),
+    )
+    plugin = main.ChatWorkBalancePlugin(FakeContext(), {})
+    plugin._resolver = cast(
+        OneBotMessageResolver,
+        StubResolver(
+            result=ResolvedMessage(
+                log_summary=(
+                    "plugin=chat_work_balance stage=message_resolved_summary "
+                    "platform=aiocqhttp unified_msg_origin=aiocqhttp:group:1 "
+                    "message_id=msg-empty"
+                ),
+            )
+        ),
+    )
+    event = FakeEvent([], message_id="msg-empty")
+
+    results = run_async(collect_async(plugin.on_message(event)))
+
+    assert results == []
+    assert event.chain_calls == []
+    assert event.plain_calls == []
+    assert event.stopped == 1
+    assert any("stage=message_received" in message and "message_id=msg-empty" in message for message in log_recorder.info)
+    assert any("stage=message_resolved_summary" in message and "message_id=msg-empty" in message for message in log_recorder.info)
+    assert any(
+        "stage=message_completed" in message
+        and "message_id=msg-empty" in message
+        and "chunk_count=0" in message
+        for message in log_recorder.info
+    )
+    assert log_recorder.exception == []
+
+
 def test_on_message_returns_short_error_when_resolver_raises(monkeypatch) -> None:
     log_recorder = types.SimpleNamespace(info=[], exception=[])
     monkeypatch.setattr(
@@ -293,7 +386,7 @@ def test_on_message_returns_short_error_when_resolver_raises(monkeypatch) -> Non
     )
     plugin = main.ChatWorkBalancePlugin(FakeContext(), {})
     plugin._resolver = cast(
-        QQChannelMessageResolver,
+        OneBotMessageResolver,
         StubResolver(error=RuntimeError("unexpected")),
     )
     event = FakeEvent([], message_id="msg-error")

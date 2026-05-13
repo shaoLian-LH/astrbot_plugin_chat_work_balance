@@ -35,7 +35,7 @@ def _install_astrbot_stubs() -> None:
             return None
 
     class PlatformAdapterType:
-        QQOFFICIAL = "qq_official"
+        AIOCQHTTP = "aiocqhttp"
 
     class EventMessageType:
         ALL = "all"
