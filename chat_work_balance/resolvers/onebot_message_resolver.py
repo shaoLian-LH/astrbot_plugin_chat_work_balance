@@ -22,7 +22,12 @@ from astrbot.core.message.components import (
 )
 
 from ..models import ReplayChunk, ReplayPlan, ResolvedMessage, ResolvedSegment
-from ..services.merged_forward_reader import MergedForwardReader
+from ..services.forward_summary_service import ForwardSummaryResult, ForwardSummaryService
+from ..services.merged_forward_reader import (
+    ForwardLayerNote,
+    ForwardTranscriptEntry,
+    MergedForwardReader,
+)
 from ..services.resource_analysis_service import ResourceAnalysisService
 
 _PLUGIN_NAME = "chat_work_balance"
@@ -34,9 +39,11 @@ class OneBotMessageResolver:
     def __init__(
         self,
         merged_forward_reader: MergedForwardReader,
+        forward_summary_service: ForwardSummaryService,
         resource_analysis_service: ResourceAnalysisService,
     ) -> None:
         self._merged_forward_reader = merged_forward_reader
+        self._forward_summary_service = forward_summary_service
         self._resource_analysis_service = resource_analysis_service
 
     async def resolve(self, event: AstrMessageEvent) -> ResolvedMessage:
@@ -258,22 +265,77 @@ class OneBotMessageResolver:
                 continue
 
             if isinstance(component, (Forward, Node, Nodes)):
-                forward_summary = await self._merged_forward_reader.summarize(
+                logger.info(
+                    self._format_observable_log(
+                        "forward_summary_started",
+                        unified_msg_origin=unified_msg_origin,
+                        message_id=message_id,
+                        platform=platform,
+                        source_index=str(index),
+                        component_kind=type(component).__name__,
+                    )
+                )
+                transcript = await self._merged_forward_reader.extract(
                     component,
+                    event=event,
                     resource_analysis_service=self._resource_analysis_service,
                     unified_msg_origin=event.unified_msg_origin,
                     source_label=f"forward:{getattr(message_obj, 'message_id', 'unknown')}#{index}",
                 )
+                transcript_text = "\n".join(
+                    self._format_transcript_entry(entry)
+                    for entry in transcript.entries
+                )
+                if transcript.notes:
+                    transcript_text = "\n".join(
+                        [transcript_text, *(note.text for note in transcript.notes)]
+                    ).strip()
+                logger.info(
+                    self._format_observable_log(
+                        "forward_transcript_extracted",
+                        unified_msg_origin=unified_msg_origin,
+                        message_id=message_id,
+                        platform=platform,
+                        source_index=str(index),
+                        component_kind=type(component).__name__,
+                        expanded_count=str(transcript.stats.total_nodes),
+                        filtered_count=str(transcript.stats.filtered_nodes),
+                        sampled_count=str(transcript.stats.sampled_nodes),
+                        truncated_layers=str(transcript.stats.truncated_layers),
+                        failed_forward_count=str(transcript.stats.failed_forwards),
+                        valid_transcript_count=str(len(transcript.entries)),
+                        sample_per_layer=self._format_sample_note_depths(transcript.notes),
+                    )
+                )
+                summary_result = await self._forward_summary_service.summarize_transcript(
+                    transcript_text,
+                    unified_msg_origin=event.unified_msg_origin,
+                    source_label=f"forward:{getattr(message_obj, 'message_id', 'unknown')}#{index}",
+                )
+                logger.info(
+                    self._format_observable_log(
+                        "forward_summary_completed",
+                        unified_msg_origin=unified_msg_origin,
+                        message_id=message_id,
+                        platform=platform,
+                        source_index=str(index),
+                        component_kind=type(component).__name__,
+                        provider_id=summary_result.provider_id or "<none>",
+                        llm_success=str(summary_result.success).lower(),
+                        summary_length=str(len(summary_result.text)),
+                    )
+                )
                 segments.append(
                     ResolvedSegment(
                         kind="forward_summary",
-                        summary=forward_summary,
+                        summary=summary_result.text,
                         payload=component,
                         source_index=index,
                         replayable=True,
+                        metadata=self._build_forward_summary_metadata(transcript_text, summary_result),
                     )
                 )
-                append_text_chunk(forward_summary, source_index=index)
+                append_text_chunk(summary_result.text, source_index=index)
                 continue
 
             segment = ResolvedSegment(
@@ -387,6 +449,18 @@ class OneBotMessageResolver:
         )
 
     @staticmethod
+    def _build_forward_summary_metadata(
+        transcript: str,
+        summary_result: ForwardSummaryResult,
+    ) -> dict[str, str]:
+        return {
+            "provider_id": summary_result.provider_id,
+            "success": str(summary_result.success).lower(),
+            "transcript_length": str(len(transcript)),
+            "summary_length": str(len(summary_result.text)),
+        }
+
+    @staticmethod
     def _describe_image(component: Image) -> str:
         if component.url:
             return "Image resource"
@@ -399,6 +473,36 @@ class OneBotMessageResolver:
     @staticmethod
     def _join_plain_text(components: list[Plain]) -> str:
         return "".join(component.text for component in components)
+
+    @staticmethod
+    def _format_transcript_entry(entry: ForwardTranscriptEntry) -> str:
+        sender = entry.sender_name
+        if entry.sender_id:
+            sender = f"{sender}({entry.sender_id})"
+        return f"{'  ' * entry.depth}{sender}: {entry.text}"
+
+    @staticmethod
+    def _format_sample_note_depths(notes: tuple[ForwardLayerNote, ...]) -> str:
+        if not notes:
+            return "<none>"
+        grouped_counts: dict[int, int] = {}
+        for note in notes:
+            skipped = OneBotMessageResolver._extract_skipped_count(note.text)
+            grouped_counts[note.depth] = grouped_counts.get(note.depth, 0) + skipped
+        return ",".join(
+            f"depth{depth}:{count}"
+            for depth, count in sorted(grouped_counts.items())
+        )
+
+    @staticmethod
+    def _extract_skipped_count(note_text: str) -> int:
+        parts = note_text.split()
+        if len(parts) < 2:
+            return 0
+        try:
+            return int(parts[1])
+        except ValueError:
+            return 0
 
     def _log_dropped_segment(
         self,

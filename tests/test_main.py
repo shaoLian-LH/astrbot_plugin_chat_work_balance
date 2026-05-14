@@ -11,13 +11,14 @@ from pathlib import Path
 from typing import cast
 
 from astrbot.api.event import filter as event_filter
-from astrbot.core.message.components import Image, Plain
+from astrbot.core.message.components import Forward, Image, Plain
 
 from chat_work_balance.config import ChatWorkBalanceConfig
 from chat_work_balance.models import ReplayChunk, ReplayPlan, ResolvedMessage
 from chat_work_balance.resolvers.onebot_message_resolver import OneBotMessageResolver
+from chat_work_balance.services.forward_summary_service import ForwardSummaryService
+from chat_work_balance.services.merged_forward_reader import ForwardTranscriptExtractionError
 from chat_work_balance.services.merged_forward_reader import MergedForwardReader
-from chat_work_balance.services import resource_analysis_service as resource_analysis_service_module
 from chat_work_balance.services.resource_analysis_service import (
     ResourceAnalysisResult,
     ResourceAnalysisService,
@@ -56,6 +57,35 @@ main = _load_plugin_main_module()
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _make_async_result(result):
+    async def _runner(*args, **kwargs):
+        del args, kwargs
+        return result
+
+    return _runner
+
+
+def _make_async_raise(error: Exception):
+    async def _runner(*args, **kwargs):
+        del args, kwargs
+        raise error
+
+    return _runner
+
+
+def _patch_runtime_loggers(plugin, monkeypatch, shared_logger) -> None:
+    resolver_module = sys.modules[plugin._resolver.__class__.__module__]
+    forward_summary_module = sys.modules[
+        plugin._resolver._forward_summary_service.__class__.__module__
+    ]
+    resource_analysis_module = sys.modules[
+        plugin._resolver._resource_analysis_service.__class__.__module__
+    ]
+    monkeypatch.setattr(resolver_module, "logger", shared_logger)
+    monkeypatch.setattr(forward_summary_module, "logger", shared_logger, raising=False)
+    monkeypatch.setattr(resource_analysis_module, "logger", shared_logger, raising=False)
+
+
 class StubResolver:
     def __init__(self, result: ResolvedMessage | None = None, error: Exception | None = None) -> None:
         self.result = result
@@ -90,9 +120,21 @@ class StubResourceAnalysisService:
 
 
 class StubMergedForwardReader:
-    async def summarize(self, component, **kwargs) -> str:
+    async def extract(self, component, **kwargs):
         del component, kwargs
-        return "Forward summary"
+        raise AssertionError("extract should not be called in this stubbed resolver test")
+
+
+class StubForwardSummaryService:
+    async def summarize_transcript(
+        self,
+        transcript: str,
+        *,
+        unified_msg_origin: str,
+        source_label: str,
+    ):
+        del transcript, unified_msg_origin, source_label
+        return None
 
 
 def test_plugin_main_imports_under_package_context() -> None:
@@ -191,10 +233,6 @@ def test_on_message_success_path_includes_real_resolver_stage_logs(monkeypatch) 
         exception=lambda message: log_recorder.exception.append(message),
     )
     monkeypatch.setattr(main, "logger", shared_logger)
-    from chat_work_balance.resolvers import onebot_message_resolver as resolver_module
-
-    monkeypatch.setattr(resolver_module, "logger", shared_logger)
-    monkeypatch.setattr(resource_analysis_service_module, "logger", shared_logger)
     provider = FakeProvider(completion_text="Desk photo")
     context = FakeContext(
         global_config={
@@ -208,11 +246,13 @@ def test_on_message_success_path_includes_real_resolver_stage_logs(monkeypatch) 
     plugin = main.ChatWorkBalancePlugin(context, {})
     plugin._resolver = OneBotMessageResolver(
         merged_forward_reader=cast(MergedForwardReader, StubMergedForwardReader()),
+        forward_summary_service=cast(ForwardSummaryService, StubForwardSummaryService()),
         resource_analysis_service=ResourceAnalysisService(
             context=context,
             plugin_config=ChatWorkBalanceConfig(),
         ),
     )
+    _patch_runtime_loggers(plugin, monkeypatch, shared_logger)
     image = Image(file_path="/tmp/desk.png")
     event = FakeEvent([Plain("hello"), image, Plain(" world")], message_id="msg-real")
 
@@ -272,6 +312,190 @@ def test_on_message_success_path_includes_real_resolver_stage_logs(monkeypatch) 
     assert any("stage=message_completed" in message and "message_id=msg-real" in message for message in log_recorder.info)
     assert log_recorder.warning == []
     assert log_recorder.exception == []
+
+
+def test_plugin_init_wires_forward_dependencies_from_plugin_config() -> None:
+    plugin = main.ChatWorkBalancePlugin(
+        FakeContext(),
+        {
+            "forward_max_depth": 5,
+            "forward_sample_threshold": 9,
+            "forward_sample_head_count": 4,
+            "forward_sample_tail_count": 3,
+        },
+    )
+
+    assert plugin._resolver._merged_forward_reader._max_depth == 5
+    assert plugin._resolver._merged_forward_reader._sample_threshold == 9
+    assert plugin._resolver._merged_forward_reader._sample_head_count == 4
+    assert plugin._resolver._merged_forward_reader._sample_tail_count == 3
+    assert plugin._resolver._forward_summary_service.__class__.__name__ == "ForwardSummaryService"
+
+
+def test_on_message_forward_summary_replays_group_chain_and_logs_without_transcript_leak(monkeypatch) -> None:
+    log_recorder = types.SimpleNamespace(info=[], warning=[], exception=[])
+    shared_logger = types.SimpleNamespace(
+        info=lambda message: log_recorder.info.append(message),
+        warning=lambda message: log_recorder.warning.append(message),
+        exception=lambda message: log_recorder.exception.append(message),
+    )
+    monkeypatch.setattr(main, "logger", shared_logger)
+
+    provider = FakeProvider(completion_text="张三：明天灰度；李四：补回滚预案。")
+    context = FakeContext(
+        global_config={
+            "provider_settings": {
+                "default_message_resolve_provider_id": "message-provider",
+            }
+        },
+        providers={"message-provider": provider},
+    )
+    plugin = main.ChatWorkBalancePlugin(context, {})
+    _patch_runtime_loggers(plugin, monkeypatch, shared_logger)
+    event = FakeEvent(
+        [Forward(id="forward-1")],
+        message_id="msg-forward-main",
+        onebot_client=types.SimpleNamespace(
+            get_forward_msg=_make_async_result(
+                {
+                    "message": [
+                        {
+                            "type": "node",
+                            "data": {
+                                "nickname": "alice",
+                                "user_id": "1001",
+                                "content": [{"type": "text", "data": {"text": "明天灰度"}}],
+                            },
+                        },
+                        {
+                            "type": "node",
+                            "data": {
+                                "nickname": "bob",
+                                "user_id": "1002",
+                                "content": [{"type": "text", "data": {"text": "需要回滚预案"}}],
+                            },
+                        },
+                    ]
+                }
+            )
+        ),
+    )
+
+    results = run_async(collect_async(plugin.on_message(event)))
+
+    assert results == [{"type": "chain", "chain": [Plain("张三：明天灰度；李四：补回滚预案。")]}]
+    assert event.chain_calls == [[Plain("张三：明天灰度；李四：补回滚预案。")]]
+    assert event.stopped == 1
+    assert provider.calls and provider.calls[0]["image_urls"] == []
+    assert any("stage=forward_summary_started" in message and "message_id=msg-forward-main" in message for message in log_recorder.info)
+    assert any(
+        "stage=forward_transcript_extracted" in message
+        and "message_id=msg-forward-main" in message
+        and "expanded_count=2" in message
+        and "filtered_count=0" in message
+        and "valid_transcript_count=2" in message
+        for message in log_recorder.info
+    )
+    assert any(
+        "stage=provider_succeeded" in message
+        and "message_id=msg-forward-main" in message
+        and "provider_id=message-provider" in message
+        for message in log_recorder.info
+    )
+    assert any(
+        "stage=forward_summary_completed" in message
+        and "message_id=msg-forward-main" in message
+        and "llm_success=true" in message
+        and "summary_length=17" in message
+        for message in log_recorder.info
+    )
+    assert all("明天灰度" not in message for message in log_recorder.info if "stage=forward_transcript_extracted" in message)
+
+
+def test_on_message_forward_summary_replays_private_chain_when_provider_returns_failure_text(monkeypatch) -> None:
+    log_recorder = types.SimpleNamespace(info=[], warning=[], exception=[])
+    shared_logger = types.SimpleNamespace(
+        info=lambda message: log_recorder.info.append(message),
+        warning=lambda message: log_recorder.warning.append(message),
+        exception=lambda message: log_recorder.exception.append(message),
+    )
+    monkeypatch.setattr(main, "logger", shared_logger)
+
+    context = FakeContext(global_config={"provider_settings": {}}, providers={})
+    plugin = main.ChatWorkBalancePlugin(context, {})
+    _patch_runtime_loggers(plugin, monkeypatch, shared_logger)
+    event = FakeEvent(
+        [Forward(id="forward-2")],
+        message_id="msg-forward-private",
+        unified_msg_origin="aiocqhttp:private:1",
+        onebot_client=types.SimpleNamespace(
+            get_forward_msg=_make_async_result(
+                {
+                    "message": [
+                        {
+                            "type": "node",
+                            "data": {
+                                "nickname": "alice",
+                                "user_id": "1001",
+                                "content": [{"type": "text", "data": {"text": "上线前要确认"}}],
+                            },
+                        }
+                    ]
+                }
+            )
+        ),
+    )
+
+    results = run_async(collect_async(plugin.on_message(event)))
+
+    assert results == [{"type": "chain", "chain": [Plain("转发总结失败：未配置消息解析模型。")]}]
+    assert event.chain_calls == [[Plain("转发总结失败：未配置消息解析模型。")]]
+    assert event.stopped == 1
+    assert any(
+        "stage=forward_summary_completed" in message
+        and "message_id=msg-forward-private" in message
+        and "provider_id=<none>" in message
+        and "llm_success=false" in message
+        for message in log_recorder.info
+    )
+    assert any(
+        "stage=message_completed" in message
+        and "message_id=msg-forward-private" in message
+        and "chunk_count=1" in message
+        for message in log_recorder.info
+    )
+
+
+def test_on_message_returns_short_error_when_forward_transcript_is_empty(monkeypatch) -> None:
+    log_recorder = types.SimpleNamespace(info=[], warning=[], exception=[])
+    shared_logger = types.SimpleNamespace(
+        info=lambda message: log_recorder.info.append(message),
+        warning=lambda message: log_recorder.warning.append(message),
+        exception=lambda message: log_recorder.exception.append(message),
+    )
+    monkeypatch.setattr(main, "logger", shared_logger)
+
+    plugin = main.ChatWorkBalancePlugin(FakeContext(), {})
+    _patch_runtime_loggers(plugin, monkeypatch, shared_logger)
+    event = FakeEvent(
+        [Forward(id="forward-empty")],
+        message_id="msg-forward-empty-main",
+        onebot_client=types.SimpleNamespace(
+            get_forward_msg=_make_async_raise(RuntimeError("boom"))
+        ),
+    )
+
+    results = run_async(collect_async(plugin.on_message(event)))
+
+    assert results == [
+        {"type": "plain", "text": "Message resolver is temporarily unavailable."}
+    ]
+    assert event.plain_calls == ["Message resolver is temporarily unavailable."]
+    assert event.stopped == 1
+    assert any("stage=forward_summary_started" in message for message in log_recorder.info)
+    assert len(log_recorder.exception) == 1
+    assert "stage=message_failed" in log_recorder.exception[0]
+    assert "error_type=ForwardTranscriptExtractionError" in log_recorder.exception[0]
 
 
 def test_on_message_private_success_path_replays_chunks_and_uses_private_origin(monkeypatch) -> None:

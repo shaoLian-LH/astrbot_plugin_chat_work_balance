@@ -8,7 +8,15 @@ from typing import cast
 from astrbot.core.message.components import At, Face, File, Forward, Image, Node, Nodes, Plain, Record, Reply, Video
 
 from chat_work_balance.resolvers.onebot_message_resolver import OneBotMessageResolver
-from chat_work_balance.services.merged_forward_reader import MergedForwardReader
+from chat_work_balance.services.forward_summary_service import ForwardSummaryResult, ForwardSummaryService
+from chat_work_balance.services.merged_forward_reader import (
+    ForwardLayerNote,
+    ForwardTranscript,
+    ForwardTranscriptEntry,
+    ForwardTranscriptExtractionError,
+    ForwardTranscriptStats,
+    MergedForwardReader,
+)
 from chat_work_balance.services.resource_analysis_service import ResourceAnalysisResult, ResourceAnalysisService
 from tests.helpers import FakeEvent, run_async
 
@@ -33,14 +41,65 @@ class StubResourceAnalysisService:
 
 
 class StubMergedForwardReader:
-    def __init__(self, summary: str = "Forward summary line") -> None:
-        self.summary = summary
+    def __init__(
+        self,
+        transcript: ForwardTranscript | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.transcript = transcript or ForwardTranscript(
+            entries=(
+                ForwardTranscriptEntry(
+                    sender_name="alice",
+                    sender_id="1001",
+                    depth=0,
+                    order=0,
+                    text="Forward transcript line",
+                ),
+            ),
+            notes=(),
+            stats=ForwardTranscriptStats(total_nodes=1, kept_nodes=1),
+        )
+        self.error = error
         self.calls: list[str] = []
 
-    async def summarize(self, component, **kwargs) -> str:
+    async def extract(self, component, **kwargs) -> ForwardTranscript:
         del component
         self.calls.append(kwargs["source_label"])
-        return self.summary
+        if self.error is not None:
+            raise self.error
+        return self.transcript
+
+
+class StubForwardSummaryService:
+    def __init__(
+        self,
+        result: ForwardSummaryResult | None = None,
+    ) -> None:
+        self.result = result or ForwardSummaryResult(
+            success=True,
+            provider_id="provider-1",
+            prompt="Prompt",
+            text="Forward summary line",
+            detail="Forward summary line",
+        )
+        self.calls: list[dict[str, str]] = []
+
+    async def summarize_transcript(
+        self,
+        transcript: str,
+        *,
+        unified_msg_origin: str,
+        source_label: str,
+    ) -> ForwardSummaryResult:
+        self.calls.append(
+            {
+                "transcript": transcript,
+                "unified_msg_origin": unified_msg_origin,
+                "source_label": source_label,
+            }
+        )
+        return self.result
 
 
 def _analysis_result(text: str, *, success: bool = True) -> ResourceAnalysisResult:
@@ -56,19 +115,31 @@ def _analysis_result(text: str, *, success: bool = True) -> ResourceAnalysisResu
 def _build_resolver(
     *,
     analysis_results: list[ResourceAnalysisResult],
-    forward_summary: str = "Forward summary line",
-) -> tuple[OneBotMessageResolver, StubResourceAnalysisService, StubMergedForwardReader]:
+    forward_summary_result: ForwardSummaryResult | None = None,
+    forward_transcript: ForwardTranscript | None = None,
+    forward_error: Exception | None = None,
+) -> tuple[
+    OneBotMessageResolver,
+    StubResourceAnalysisService,
+    StubMergedForwardReader,
+    StubForwardSummaryService,
+]:
     analysis_service = StubResourceAnalysisService(analysis_results)
-    forward_reader = StubMergedForwardReader(summary=forward_summary)
+    forward_reader = StubMergedForwardReader(
+        transcript=forward_transcript,
+        error=forward_error,
+    )
+    forward_summary_service = StubForwardSummaryService(result=forward_summary_result)
     resolver = OneBotMessageResolver(
         merged_forward_reader=cast(MergedForwardReader, forward_reader),
+        forward_summary_service=cast(ForwardSummaryService, forward_summary_service),
         resource_analysis_service=cast(ResourceAnalysisService, analysis_service),
     )
-    return resolver, analysis_service, forward_reader
+    return resolver, analysis_service, forward_reader, forward_summary_service
 
 
 def test_resolve_plain_text_keeps_original_text_and_log_context() -> None:
-    resolver, _, _ = _build_resolver(analysis_results=[])
+    resolver, _, _, _ = _build_resolver(analysis_results=[])
     event = FakeEvent([Plain("hello"), Plain(" world")], message_id="msg-text")
 
     resolved = run_async(resolver.resolve(event))
@@ -87,7 +158,7 @@ def test_resolve_plain_text_keeps_original_text_and_log_context() -> None:
 
 
 def test_resolve_image_analysis_text_isolated_from_media_chunks() -> None:
-    resolver, analysis_service, _ = _build_resolver(
+    resolver, analysis_service, _, _ = _build_resolver(
         analysis_results=[_analysis_result("Image analysis: Whiteboard summary")]
     )
     event = FakeEvent(
@@ -127,12 +198,18 @@ def test_resolve_image_analysis_text_isolated_from_media_chunks() -> None:
 
 
 def test_resolve_multi_rich_media_enforces_single_media_intent_per_chunk() -> None:
-    resolver, analysis_service, forward_reader = _build_resolver(
+    resolver, analysis_service, forward_reader, _ = _build_resolver(
         analysis_results=[
             _analysis_result("Image analysis: first image"),
             _analysis_result("Image analysis: second image"),
         ],
-        forward_summary="Forward summary line",
+        forward_summary_result=ForwardSummaryResult(
+            success=True,
+            provider_id="provider-1",
+            prompt="Prompt",
+            text="Forward summary line",
+            detail="Forward summary line",
+        ),
     )
     event = FakeEvent(
         [
@@ -199,9 +276,36 @@ def test_resolve_multi_rich_media_enforces_single_media_intent_per_chunk() -> No
 
 
 def test_resolve_forward_node_and_nodes_only_emit_summary_text() -> None:
-    resolver, _, forward_reader = _build_resolver(
+    transcript = ForwardTranscript(
+        entries=(
+            ForwardTranscriptEntry(
+                sender_name="alice",
+                sender_id="1001",
+                depth=0,
+                order=0,
+                text="nested",
+            ),
+        ),
+        notes=(ForwardLayerNote(depth=1, text="Skipped 2 nodes in this layer"),),
+        stats=ForwardTranscriptStats(
+            total_nodes=3,
+            kept_nodes=1,
+            sampled_nodes=2,
+            filtered_nodes=1,
+            truncated_layers=0,
+            failed_forwards=0,
+        ),
+    )
+    resolver, _, forward_reader, forward_summary_service = _build_resolver(
         analysis_results=[],
-        forward_summary="Merged forward summary",
+        forward_summary_result=ForwardSummaryResult(
+            success=True,
+            provider_id="provider-9",
+            prompt="Prompt",
+            text="Merged forward summary",
+            detail="Merged forward summary",
+        ),
+        forward_transcript=transcript,
     )
     event = FakeEvent(
         [
@@ -235,10 +339,33 @@ def test_resolve_forward_node_and_nodes_only_emit_summary_text() -> None:
         "forward:msg-forward#1",
         "forward:msg-forward#2",
     ]
+    assert forward_summary_service.calls == [
+        {
+            "transcript": "alice(1001): nested\nSkipped 2 nodes in this layer",
+            "unified_msg_origin": "aiocqhttp:group:1",
+            "source_label": "forward:msg-forward#0",
+        },
+        {
+            "transcript": "alice(1001): nested\nSkipped 2 nodes in this layer",
+            "unified_msg_origin": "aiocqhttp:group:1",
+            "source_label": "forward:msg-forward#1",
+        },
+        {
+            "transcript": "alice(1001): nested\nSkipped 2 nodes in this layer",
+            "unified_msg_origin": "aiocqhttp:group:1",
+            "source_label": "forward:msg-forward#2",
+        },
+    ]
+    assert resolved.segments[0].metadata == {
+        "provider_id": "provider-9",
+        "success": "true",
+        "transcript_length": "49",
+        "summary_length": "22",
+    }
 
 
 def test_resolve_dropped_segments_stay_observable_alongside_supported_text() -> None:
-    resolver, _, _ = _build_resolver(analysis_results=[])
+    resolver, _, _, _ = _build_resolver(analysis_results=[])
     event = FakeEvent(
         [
             Plain("hello"),
@@ -296,7 +423,7 @@ def test_resolve_dropped_segments_stay_observable_alongside_supported_text() -> 
 
 
 def test_resolve_image_failure_still_replays_image_and_following_file() -> None:
-    resolver, _, _ = _build_resolver(
+    resolver, _, _, _ = _build_resolver(
         analysis_results=[
             _analysis_result("Image analysis failed during provider call.", success=False)
         ]
@@ -320,3 +447,103 @@ def test_resolve_image_failure_still_replays_image_and_following_file() -> None:
     assert resolved.segments[1].metadata["success"] == "false"
     file_chunk = resolved.replay_plan.chunks[2]
     assert file_chunk.chain[0].file == "/tmp/report.txt"
+
+
+def test_resolve_forward_summary_failure_replays_failure_text_and_logs_stats() -> None:
+    transcript = ForwardTranscript(
+        entries=(
+            ForwardTranscriptEntry(
+                sender_name="alice",
+                sender_id="1001",
+                depth=0,
+                order=0,
+                text="Launch tomorrow",
+            ),
+            ForwardTranscriptEntry(
+                sender_name="bob",
+                sender_id="1002",
+                depth=1,
+                order=1,
+                text="Need rollback plan",
+            ),
+        ),
+        notes=(
+            ForwardLayerNote(depth=0, text="Skipped 1 nodes in this layer"),
+            ForwardLayerNote(depth=1, text="Skipped 2 nodes in this layer"),
+        ),
+        stats=ForwardTranscriptStats(
+            total_nodes=5,
+            kept_nodes=2,
+            sampled_nodes=3,
+            filtered_nodes=1,
+            truncated_layers=1,
+            failed_forwards=0,
+        ),
+    )
+    resolver, _, _, _ = _build_resolver(
+        analysis_results=[],
+        forward_transcript=transcript,
+        forward_summary_result=ForwardSummaryResult(
+            success=False,
+            provider_id="provider-2",
+            prompt="Prompt",
+            text="转发总结失败：消息解析模型连续 3 次未返回有效摘要。",
+            detail="转发总结失败：消息解析模型连续 3 次未返回有效摘要。",
+        ),
+    )
+    event = FakeEvent([Forward(id="forward-1")], message_id="msg-forward-failure")
+    log_recorder = types.SimpleNamespace(info=[], warning=[])
+    from chat_work_balance.resolvers import onebot_message_resolver as resolver_module
+
+    original_logger = resolver_module.logger
+    resolver_module.logger = types.SimpleNamespace(
+        info=lambda message: log_recorder.info.append(message),
+        warning=lambda message: log_recorder.warning.append(message),
+    )
+    try:
+        resolved = run_async(resolver.resolve(event))
+    finally:
+        resolver_module.logger = original_logger
+
+    assert [segment.kind for segment in resolved.segments] == ["forward_summary"]
+    assert resolved.replay_plan.chunks[0].intent == "text"
+    assert resolved.replay_plan.chunks[0].summary == "转发总结失败：消息解析模型连续 3 次未返回有效摘要。"
+    assert resolved.segments[0].metadata["provider_id"] == "provider-2"
+    assert resolved.segments[0].metadata["success"] == "false"
+    assert any("stage=forward_summary_started" in message for message in log_recorder.info)
+    assert any(
+        "stage=forward_transcript_extracted" in message
+        and "expanded_count=5" in message
+        and "filtered_count=1" in message
+        and "sampled_count=3" in message
+        and "sample_per_layer=depth0:1,depth1:2" in message
+        and "valid_transcript_count=2" in message
+        for message in log_recorder.info
+    )
+    assert any(
+        "stage=forward_summary_completed" in message
+        and "provider_id=provider-2" in message
+        and "llm_success=false" in message
+        for message in log_recorder.info
+    )
+    assert all("Launch tomorrow" not in message for message in log_recorder.info)
+
+
+def test_resolve_forward_extraction_error_bubbles_up_without_calling_summary_service() -> None:
+    resolver, _, forward_reader, forward_summary_service = _build_resolver(
+        analysis_results=[],
+        forward_error=ForwardTranscriptExtractionError(
+            "Merged forward transcript extraction produced no valid content."
+        ),
+    )
+    event = FakeEvent([Forward(id="forward-1")], message_id="msg-forward-empty")
+
+    try:
+        run_async(resolver.resolve(event))
+    except ForwardTranscriptExtractionError as exc:
+        assert str(exc) == "Merged forward transcript extraction produced no valid content."
+    else:
+        raise AssertionError("Expected ForwardTranscriptExtractionError")
+
+    assert forward_reader.calls == ["forward:msg-forward-empty#0"]
+    assert forward_summary_service.calls == []

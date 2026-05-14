@@ -8,6 +8,7 @@ from astrbot.api.star import Context, Star, register
 
 from .chat_work_balance import ChatWorkBalanceConfig
 from .chat_work_balance.resolvers.onebot_message_resolver import OneBotMessageResolver
+from .chat_work_balance.services.forward_summary_service import ForwardSummaryService
 from .chat_work_balance.services.merged_forward_reader import MergedForwardReader
 from .chat_work_balance.services.resource_analysis_service import ResourceAnalysisService
 
@@ -24,13 +25,23 @@ class ChatWorkBalancePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
         plugin_config = ChatWorkBalanceConfig.from_astrbot_config(config)
-        merged_forward_reader = MergedForwardReader()
+        merged_forward_reader = MergedForwardReader(
+            max_depth=plugin_config.forward_max_depth,
+            sample_threshold=plugin_config.forward_sample_threshold,
+            sample_head_count=plugin_config.forward_sample_head_count,
+            sample_tail_count=plugin_config.forward_sample_tail_count,
+        )
+        forward_summary_service = ForwardSummaryService(
+            context=context,
+            plugin_config=plugin_config,
+        )
         resource_analysis_service = ResourceAnalysisService(
             context=context,
             plugin_config=plugin_config,
         )
         self._resolver = OneBotMessageResolver(
             merged_forward_reader=merged_forward_reader,
+            forward_summary_service=forward_summary_service,
             resource_analysis_service=resource_analysis_service,
         )
         logger.info(

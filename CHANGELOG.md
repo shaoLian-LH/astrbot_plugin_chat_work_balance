@@ -10,3 +10,4 @@
 - Bootstrapped a minimal `uv` project with locked dev-test dependencies for Slice C verification.
 - Added forward transcript extraction config, per-layer sampling, OneBot `Forward(id)` expansion, and transcript extraction tests for merged-forward parsing.
 - Added ForwardSummaryService with dedicated message-provider selection, Chinese prompt guidance, retry handling, and focused summary-service tests.
+- Integrated forward transcript extraction and summary service into the OneBot resolver and plugin entrypoint, with end-to-end replay and error-path tests.
