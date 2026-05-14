@@ -2,7 +2,7 @@ name: chat_work_balance
 display_name: Chat Work Balance
 desc: OneBot message resolver for replay-oriented diagnostics.
 version: v0.0.1
-author: xuemufan
-repo: https://github.com/xuemufan/astrbot_plugin_chat_work_balance
+author: slfk
+repo: https://github.com/shaoLian-LH/astrbot_plugin_chat_work_balance
 support_platforms:
   - aiocqhttp
