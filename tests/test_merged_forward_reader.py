@@ -61,6 +61,32 @@ class FakeOneBotClient:
         return self.response
 
 
+class FakeOneBotActionClient:
+    def __init__(
+        self,
+        response: dict[str, object] | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.response = response or {"message": []}
+        self.error = error
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    async def call_action(self, action: str, **kwargs: object) -> dict[str, object]:
+        self.calls.append((action, dict(kwargs)))
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+class FakeOneBotApiClient:
+    def __init__(
+        self,
+        response: dict[str, object] | None = None,
+    ) -> None:
+        self.api = FakeOneBotActionClient(response)
+
+
 def _extract(
     component: Forward | Node | Nodes,
     *,
@@ -353,6 +379,101 @@ def test_extract_expands_forward_reference_from_top_level_messages() -> None:
     assert onebot_client.calls == ["forward-top-messages"]
     assert [(entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
         ("team lead", "1002", "Status from top-level messages")
+    ]
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.filtered_nodes == 0
+    assert transcript.stats.failed_forwards == 0
+
+
+def test_extract_expands_forward_reference_via_direct_call_action() -> None:
+    onebot_client = FakeOneBotActionClient(
+        response={
+            "data": {
+                "messages": [
+                    {
+                        "message": [
+                            {"type": "text", "data": {"text": "Status from call_action"}}
+                        ],
+                        "sender": {
+                            "nickname": "alice",
+                            "user_id": "1001",
+                        },
+                    }
+                ]
+            }
+        }
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-action"), event=event)
+
+    assert onebot_client.calls == [
+        ("get_forward_msg", {"message_id": "forward-action"})
+    ]
+    assert [(entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        ("alice", "1001", "Status from call_action")
+    ]
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.filtered_nodes == 0
+    assert transcript.stats.failed_forwards == 0
+
+
+def test_extract_expands_forward_reference_via_nested_api_call_action() -> None:
+    onebot_client = FakeOneBotApiClient(
+        response={
+            "data": {
+                "message": [
+                    {
+                        "content": [
+                            {"type": "text", "data": {"text": "Status from api call_action"}}
+                        ],
+                        "sender": {
+                            "nickname": "bob",
+                            "user_id": "1002",
+                        },
+                    }
+                ]
+            }
+        }
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-api-action"), event=event)
+
+    assert onebot_client.api.calls == [
+        ("get_forward_msg", {"message_id": "forward-api-action"})
+    ]
+    assert [(entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        ("bob", "1002", "Status from api call_action")
+    ]
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.filtered_nodes == 0
+    assert transcript.stats.failed_forwards == 0
+
+
+def test_extract_expands_forward_reference_from_single_data_node() -> None:
+    onebot_client = FakeOneBotActionClient(
+        response={
+            "data": {
+                "message": [
+                    {"type": "text", "data": {"text": "Status from single data node"}}
+                ],
+                "sender": {
+                    "nickname": "carol",
+                    "user_id": "1003",
+                },
+            }
+        }
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-single-node"), event=event)
+
+    assert onebot_client.calls == [
+        ("get_forward_msg", {"message_id": "forward-single-node"})
+    ]
+    assert [(entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        ("carol", "1003", "Status from single data node")
     ]
     assert transcript.stats.kept_nodes == 1
     assert transcript.stats.filtered_nodes == 0

@@ -286,6 +286,7 @@ class OneBotMessageResolver:
                         source_label=f"forward:{getattr(message_obj, 'message_id', 'unknown')}#{index}",
                     )
                 except ForwardTranscriptExtractionError as exc:
+                    stats = getattr(exc, "stats", None)
                     logger.warning(
                         self._format_observable_log(
                             "forward_transcript_failed",
@@ -295,6 +296,10 @@ class OneBotMessageResolver:
                             source_index=str(index),
                             component_kind=type(component).__name__,
                             error_type=type(exc).__name__,
+                            expanded_count=str(getattr(stats, "total_nodes", 0)),
+                            filtered_count=str(getattr(stats, "filtered_nodes", 0)),
+                            failed_forward_count=str(getattr(stats, "failed_forwards", 0)),
+                            truncated_layers=str(getattr(stats, "truncated_layers", 0)),
                         )
                     )
                     segments.append(

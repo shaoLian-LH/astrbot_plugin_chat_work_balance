@@ -28,6 +28,10 @@ from .resource_analysis_service import ResourceAnalysisService
 class ForwardTranscriptExtractionError(RuntimeError):
     """Raised when a merged forward message cannot produce any transcript entries."""
 
+    def __init__(self, message: str, *, stats: object | None = None) -> None:
+        super().__init__(message)
+        self.stats = stats
+
 
 @dataclass(frozen=True)
 class ForwardTranscriptEntry:
@@ -104,8 +108,10 @@ class MergedForwardReader:
             source_label=source_label,
         )
         if not state.entries:
+            stats = state.stats.freeze()
             raise ForwardTranscriptExtractionError(
-                "Merged forward transcript extraction produced no valid content."
+                "Merged forward transcript extraction produced no valid content.",
+                stats=stats,
             )
         return ForwardTranscript(
             entries=tuple(state.entries),
@@ -301,7 +307,13 @@ class MergedForwardReader:
             state.stats.truncated_layers += 1
             return
 
-        resolved_forward = await self._resolve_forward_nodes(event, component.id)
+        forward_id = self._extract_forward_id(component)
+        if not forward_id:
+            state.stats.failed_forwards += 1
+            state.stats.filtered_nodes += 1
+            return
+
+        resolved_forward = await self._resolve_forward_nodes(event, forward_id)
         if resolved_forward is None:
             state.stats.failed_forwards += 1
             state.stats.filtered_nodes += 1
@@ -316,7 +328,7 @@ class MergedForwardReader:
             event=event,
             resource_analysis_service=resource_analysis_service,
             unified_msg_origin=unified_msg_origin,
-            source_label=f"{source_label}:forward:{component.id}",
+            source_label=f"{source_label}:forward:{forward_id}",
         )
 
     async def _resolve_forward_nodes(
@@ -328,18 +340,8 @@ class MergedForwardReader:
         if bot is None:
             return None
 
-        get_forward_msg = getattr(bot, "get_forward_msg", None)
-        if not callable(get_forward_msg):
-            return None
-
-        get_forward_msg_async = cast(
-            Callable[[str], Awaitable[dict[str, object] | object]],
-            get_forward_msg,
-        )
-
-        try:
-            response = await get_forward_msg_async(forward_id)
-        except Exception:
+        response = await self._fetch_forward_response(bot, forward_id)
+        if response is None:
             return None
 
         raw_messages = self._extract_forward_messages(response)
@@ -356,16 +358,81 @@ class MergedForwardReader:
             nodes.append(node)
         return nodes, filtered_count
 
+    async def _fetch_forward_response(self, bot: object, forward_id: str) -> object | None:
+        get_forward_msg = getattr(bot, "get_forward_msg", None)
+        if callable(get_forward_msg):
+            for kwargs in (
+                {},
+                {"id": forward_id},
+                {"message_id": forward_id},
+            ):
+                try:
+                    if kwargs:
+                        response = await cast(
+                            Callable[..., Awaitable[object]],
+                            get_forward_msg,
+                        )(**kwargs)
+                    else:
+                        response = await cast(
+                            Callable[[str], Awaitable[object]],
+                            get_forward_msg,
+                        )(forward_id)
+                except Exception:
+                    continue
+                if self._extract_forward_messages(response) is not None:
+                    return response
+
+        for call_action in self._iter_call_action_methods(bot):
+            for kwargs in (
+                {"message_id": forward_id},
+                {"id": forward_id},
+                {"forward_id": forward_id},
+            ):
+                try:
+                    response = await cast(
+                        Callable[..., Awaitable[object]],
+                        call_action,
+                    )("get_forward_msg", **kwargs)
+                except Exception:
+                    continue
+                if self._extract_forward_messages(response) is not None:
+                    return response
+
+        return None
+
+    @staticmethod
+    def _iter_call_action_methods(bot: object) -> Iterable[Callable[..., object]]:
+        call_action = getattr(bot, "call_action", None)
+        if callable(call_action):
+            yield call_action
+
+        api = getattr(bot, "api", None)
+        api_call_action = getattr(api, "call_action", None)
+        if callable(api_call_action):
+            yield api_call_action
+
     def _extract_forward_messages(self, response: object) -> Sequence[object] | None:
+        direct_messages = self._normalize_message_sequence(response)
+        if direct_messages is not None:
+            return direct_messages
+
         if not isinstance(response, dict):
             return None
 
         data = response.get("data")
+        data_sequence = self._normalize_message_sequence(data)
+        if data_sequence is not None:
+            return data_sequence
         if isinstance(data, dict):
-            data_messages = self._normalize_message_sequence(data.get("messages"))
-            if data_messages is not None:
-                return data_messages
+            if self._looks_like_forward_node(data):
+                return [data]
+            for key in ("messages", "message"):
+                data_messages = self._normalize_message_sequence(data.get(key))
+                if data_messages is not None:
+                    return data_messages
 
+        if self._looks_like_forward_node(response):
+            return [response]
         for key in ("messages", "message"):
             messages = self._normalize_message_sequence(response.get(key))
             if messages is not None:
@@ -380,6 +447,43 @@ class MergedForwardReader:
         if isinstance(value, Sequence):
             return value
         return None
+
+    @staticmethod
+    def _looks_like_forward_node(value: object) -> bool:
+        if not isinstance(value, dict):
+            return False
+        if value.get("type") == "node":
+            return True
+        if "content" in value:
+            return True
+        if "message" in value:
+            return any(
+                key in value
+                for key in ("sender", "user_id", "uin", "nickname", "name")
+            )
+        return False
+
+    @staticmethod
+    def _extract_forward_id(component: Forward) -> str:
+        for attr in ("id", "forward_id", "message_id"):
+            value = getattr(component, attr, None)
+            if value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized:
+                return normalized
+
+        data = getattr(component, "data", None)
+        if isinstance(data, dict):
+            for key in ("id", "forward_id", "message_id"):
+                value = data.get(key)
+                if value is None:
+                    continue
+                normalized = str(value).strip()
+                if normalized:
+                    return normalized
+
+        return ""
 
     def _coerce_forward_node(self, item: object) -> tuple[Node | None, int]:
         if isinstance(item, Node):
@@ -397,7 +501,7 @@ class MergedForwardReader:
             raw_data = item.get("data")
             if isinstance(raw_data, dict):
                 data = raw_data
-        elif "content" in item:
+        elif "content" in item or "message" in item:
             data = item
 
         if not isinstance(data, dict):
@@ -406,6 +510,8 @@ class MergedForwardReader:
         normalized: list[BaseMessageComponent] = []
         filtered_count = 0
         content = data.get("content")
+        if content is None:
+            content = data.get("message")
         if isinstance(content, str):
             normalized.append(Plain(content))
         elif isinstance(content, list):
