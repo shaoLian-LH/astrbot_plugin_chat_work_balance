@@ -4,5 +4,35 @@
     "_special": "select_provider",
     "description": "Image analysis provider",
     "default": ""
+  },
+  "message_resolve_provider_id": {
+    "type": "string",
+    "_special": "select_provider",
+    "description": "Message resolve provider",
+    "default": ""
+  },
+  "forward_max_depth": {
+    "type": "integer",
+    "description": "Maximum nested depth to expand in merged forward messages",
+    "default": 3,
+    "minimum": 0
+  },
+  "forward_sample_threshold": {
+    "type": "integer",
+    "description": "Maximum number of nodes per layer before sampling is applied",
+    "default": 50,
+    "minimum": 0
+  },
+  "forward_sample_head_count": {
+    "type": "integer",
+    "description": "Number of nodes kept from the start of an oversized layer",
+    "default": 30,
+    "minimum": 0
+  },
+  "forward_sample_tail_count": {
+    "type": "integer",
+    "description": "Number of nodes kept from the end of an oversized layer",
+    "default": 20,
+    "minimum": 0
   }
 }

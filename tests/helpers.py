@@ -57,9 +57,12 @@ class FakeEvent:
         *,
         message_id: str = "msg-1",
         unified_msg_origin: str = "aiocqhttp:group:1",
+        onebot_client: object | None = None,
     ) -> None:
         self.message_obj = types.SimpleNamespace(message=message, message_id=message_id)
         self.unified_msg_origin = unified_msg_origin
+        if onebot_client is not None:
+            self.bot = onebot_client
         self.chain_calls: list[list[object]] = []
         self.plain_calls: list[str] = []
         self.stopped = 0
