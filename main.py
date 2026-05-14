@@ -73,17 +73,32 @@ class ChatWorkBalancePlugin(Star):
         try:
             resolved_message = await self._resolver.resolve(event)
             logger.info(resolved_message.log_summary)
+            forward_summary_indexes = {
+                segment.source_index
+                for segment in resolved_message.segments
+                if segment.kind == "forward_summary"
+            }
             for chunk_index, chunk in enumerate(resolved_message.replay_plan.chunks):
+                chunk_fields = {
+                    "chunk_index": str(chunk_index),
+                    "chunk_intent": chunk.intent,
+                    "source_indexes": _format_source_indexes(chunk.source_indexes),
+                }
+                if any(
+                    source_index in forward_summary_indexes
+                    for source_index in chunk.source_indexes
+                ):
+                    chunk_fields["chunk_summary_length"] = str(len(chunk.summary))
+                    chunk_fields["chunk_source"] = "forward_summary"
+                else:
+                    chunk_fields["chunk_summary"] = _shorten(chunk.summary)
                 logger.info(
                     _format_observable_log(
                         "chunk_replayed",
                         unified_msg_origin=unified_msg_origin,
                         message_id=message_id,
                         platform=platform,
-                        chunk_index=str(chunk_index),
-                        chunk_intent=chunk.intent,
-                        source_indexes=_format_source_indexes(chunk.source_indexes),
-                        chunk_summary=_shorten(chunk.summary),
+                        **chunk_fields,
                     )
                 )
                 yield event.chain_result(chunk.chain)

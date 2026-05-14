@@ -526,7 +526,45 @@ def test_resolve_forward_summary_failure_replays_failure_text_and_logs_stats() -
         and "llm_success=false" in message
         for message in log_recorder.info
     )
+    assert "forwards=['forward_summary(provider_id=provider-2,success=false,transcript_length=120,summary_length=27,source_index=0)']" in resolved.log_summary
     assert all("Launch tomorrow" not in message for message in log_recorder.info)
+    assert "Launch tomorrow" not in resolved.log_summary
+    assert "Need rollback plan" not in resolved.log_summary
+    assert "转发总结失败：消息解析模型连续 3 次未返回有效摘要。" not in resolved.log_summary
+
+
+def test_resolve_forward_summary_log_summary_does_not_leak_transcript_or_summary_body() -> None:
+    transcript = ForwardTranscript(
+        entries=(
+            ForwardTranscriptEntry(
+                sender_name="alice",
+                sender_id="1001",
+                depth=0,
+                order=0,
+                text="Secret launch note",
+            ),
+        ),
+        notes=(),
+        stats=ForwardTranscriptStats(total_nodes=1, kept_nodes=1),
+    )
+    resolver, _, _, _ = _build_resolver(
+        analysis_results=[],
+        forward_transcript=transcript,
+        forward_summary_result=ForwardSummaryResult(
+            success=True,
+            provider_id="provider-9",
+            prompt="Prompt",
+            text="Summary keeps key quote: Secret launch note",
+            detail="Summary keeps key quote: Secret launch note",
+        ),
+    )
+    event = FakeEvent([Forward(id="forward-redacted")], message_id="msg-forward-redacted")
+
+    resolved = run_async(resolver.resolve(event))
+
+    assert "forwards=['forward_summary(provider_id=provider-9,success=true,transcript_length=31,summary_length=43,source_index=0)']" in resolved.log_summary
+    assert "Secret launch note" not in resolved.log_summary
+    assert "Summary keeps key quote" not in resolved.log_summary
 
 
 def test_resolve_forward_extraction_error_bubbles_up_without_calling_summary_service() -> None:

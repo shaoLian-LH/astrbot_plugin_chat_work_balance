@@ -400,6 +400,7 @@ def test_on_message_forward_summary_replays_group_chain_and_logs_without_transcr
         "stage=provider_succeeded" in message
         and "message_id=msg-forward-main" in message
         and "provider_id=message-provider" in message
+        and "summary_length=17" in message
         for message in log_recorder.info
     )
     assert any(
@@ -409,7 +410,22 @@ def test_on_message_forward_summary_replays_group_chain_and_logs_without_transcr
         and "summary_length=17" in message
         for message in log_recorder.info
     )
-    assert all("明天灰度" not in message for message in log_recorder.info if "stage=forward_transcript_extracted" in message)
+    assert any(
+        "stage=message_resolved_summary" in message
+        and "forwards=['forward_summary(provider_id=message-provider,success=true,transcript_length=35,summary_length=17,source_index=0)']" in message
+        for message in log_recorder.info
+    )
+    assert any(
+        "stage=chunk_replayed" in message
+        and "message_id=msg-forward-main" in message
+        and "chunk_source=forward_summary" in message
+        and "chunk_summary_length=17" in message
+        and "chunk_summary=" not in message
+        for message in log_recorder.info
+    )
+    assert all("明天灰度" not in message for message in log_recorder.info)
+    assert all("需要回滚预案" not in message for message in log_recorder.info)
+    assert all("张三：明天灰度；李四：补回滚预案。" not in message for message in log_recorder.info)
 
 
 def test_on_message_forward_summary_replays_private_chain_when_provider_returns_failure_text(monkeypatch) -> None:
@@ -456,6 +472,14 @@ def test_on_message_forward_summary_replays_private_chain_when_provider_returns_
         and "message_id=msg-forward-private" in message
         and "provider_id=<none>" in message
         and "llm_success=false" in message
+        for message in log_recorder.info
+    )
+    assert any(
+        "stage=chunk_replayed" in message
+        and "message_id=msg-forward-private" in message
+        and "chunk_source=forward_summary" in message
+        and "chunk_summary_length=17" in message
+        and "chunk_summary=" not in message
         for message in log_recorder.info
     )
     assert any(

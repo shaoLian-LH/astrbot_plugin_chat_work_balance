@@ -423,7 +423,7 @@ class OneBotMessageResolver:
             if segment.kind == "file"
         ]
         forward_results = [
-            segment.summary
+            self._format_forward_summary_log_field(segment)
             for segment in segments
             if segment.kind == "forward_summary"
         ]
@@ -446,6 +446,23 @@ class OneBotMessageResolver:
             f"files={file_results or ['<none>']} "
             f"forwards={forward_results or ['<none>']} "
             f"failures={failures or ['<none>']}"
+        )
+
+    @staticmethod
+    def _format_forward_summary_log_field(segment: ResolvedSegment) -> str:
+        metadata = segment.metadata
+        provider_id = metadata.get("provider_id") or "<none>"
+        success = metadata.get("success") or "<unknown>"
+        transcript_length = metadata.get("transcript_length") or "0"
+        summary_length = metadata.get("summary_length") or "0"
+        return (
+            "forward_summary("
+            f"provider_id={provider_id},"
+            f"success={success},"
+            f"transcript_length={transcript_length},"
+            f"summary_length={summary_length},"
+            f"source_index={segment.source_index}"
+            ")"
         )
 
     @staticmethod

@@ -123,7 +123,6 @@ class ForwardSummaryService:
                     provider_id=provider_id,
                     attempt=str(attempt),
                     summary_length=str(len(completion_text)),
-                    detail=self._shorten(completion_text),
                 )
             )
             return ForwardSummaryResult(
