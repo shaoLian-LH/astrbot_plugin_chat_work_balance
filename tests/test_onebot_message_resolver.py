@@ -164,7 +164,7 @@ def test_resolve_image_analysis_text_isolated_from_media_chunks() -> None:
     event = FakeEvent(
         [
             Plain("before"),
-            Image(url="https://example.com/whiteboard.png"),
+            Image(file="https://example.com/whiteboard.png", url="https://example.com/whiteboard.png"),
             Plain("after"),
         ],
         message_id="msg-image-analysis",
@@ -214,11 +214,11 @@ def test_resolve_multi_rich_media_enforces_single_media_intent_per_chunk() -> No
     event = FakeEvent(
         [
             Plain("alpha"),
-            Image(url="https://example.com/1.png"),
+            Image(file="https://example.com/1.png", url="https://example.com/1.png"),
             File(name="first.txt", get_file_result="https://files.example.com/first.txt"),
             Plain("beta"),
             Nodes(nodes=[]),
-            Image(url="https://example.com/2.png"),
+            Image(file="https://example.com/2.png", url="https://example.com/2.png"),
             Record(file="/tmp/audio.wav"),
             Video(file="/tmp/video.mp4"),
             File(name="second.txt", get_file_result="/tmp/second.txt"),
@@ -430,7 +430,7 @@ def test_resolve_image_failure_still_replays_image_and_following_file() -> None:
     )
     event = FakeEvent(
         [
-            Image(url="https://example.com/problem.png"),
+            Image(file="https://example.com/problem.png", url="https://example.com/problem.png"),
             File(name="report.txt", get_file_result="/tmp/report.txt"),
         ],
         message_id="msg-failure",

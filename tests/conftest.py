@@ -78,8 +78,8 @@ def _install_astrbot_stubs() -> None:
 
     @dataclass
     class Image(BaseMessageComponent):
+        file: str
         url: str = ""
-        file: str = ""
         file_path: str = "/tmp/image.png"
         base64_data: str = "ZmFrZS1pbWFnZQ=="
         file_path_error: Exception | None = None

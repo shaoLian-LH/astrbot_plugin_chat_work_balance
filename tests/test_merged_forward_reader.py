@@ -2,10 +2,11 @@ from __future__ import annotations
 
 # pyright: reportMissingImports=false
 
+from collections.abc import Mapping
 from typing import cast
 
 import pytest
-from astrbot.core.message.components import Forward, Image, Node, Nodes, Plain
+from astrbot.core.message.components import At, Face, Forward, Image, Node, Nodes, Plain, Reply
 
 from chat_work_balance.services.merged_forward_reader import (
     ForwardTranscriptExtractionError,
@@ -46,11 +47,13 @@ class StubResourceAnalysisService:
 class FakeOneBotClient:
     def __init__(
         self,
-        response: dict[str, object] | None = None,
+        response: Mapping[str, object] | None = None,
         *,
+        responses: Mapping[str, Mapping[str, object]] | None = None,
         error: Exception | None = None,
     ) -> None:
-        self.response = response or {"message": []}
+        self.response = dict(response or {"message": []})
+        self.responses = {key: dict(value) for key, value in (responses or {}).items()}
         self.error = error
         self.calls: list[str] = []
 
@@ -58,6 +61,8 @@ class FakeOneBotClient:
         self.calls.append(forward_id)
         if self.error is not None:
             raise self.error
+        if forward_id in self.responses:
+            return self.responses[forward_id]
         return self.response
 
 
@@ -297,6 +302,209 @@ def test_extract_expands_forward_reference_and_collects_image_analysis() -> None
     ]
     assert transcript.stats.failed_forwards == 0
     assert transcript.stats.filtered_nodes == 0
+
+
+def test_extract_expands_image_only_forward_reference() -> None:
+    analysis_service = StubResourceAnalysisService("Image analysis: Screenshot only")
+    onebot_client = FakeOneBotClient(
+        response={
+            "message": [
+                {
+                    "type": "node",
+                    "data": {
+                        "nickname": "alice",
+                        "user_id": "1001",
+                        "content": [
+                            {
+                                "type": "image",
+                                "data": {"url": "https://example.com/screenshot.png"},
+                            },
+                        ],
+                    }
+                }
+            ]
+        }
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(
+        Forward(id="forward-image-only"),
+        event=event,
+        analysis_service=analysis_service,
+    )
+
+    assert onebot_client.calls == ["forward-image-only"]
+    assert [(entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        ("alice", "1001", "Image analysis: Screenshot only")
+    ]
+    assert analysis_service.calls == [
+        {"unified_msg_origin": "umo", "source_label": "forward:1:forward:forward-image-only:0#0"}
+    ]
+    assert transcript.stats.failed_forwards == 0
+    assert transcript.stats.filtered_nodes == 0
+
+
+def test_extract_expands_nested_forward_reference_with_image_analysis() -> None:
+    analysis_service = StubResourceAnalysisService("Image analysis: Nested screenshot")
+    outer_response = {
+        "message": [
+            {
+                "type": "node",
+                "data": {
+                    "nickname": "outer",
+                    "user_id": "1001",
+                    "content": [
+                        {
+                            "type": "node",
+                            "data": {"id": "nested-forward"},
+                        },
+                    ],
+                },
+            }
+        ]
+    }
+    onebot_client = FakeOneBotClient(
+        response=outer_response,
+        responses={
+            "forward-deep-image": outer_response,
+            "nested-forward": {
+                "message": [
+                    {
+                        "type": "node",
+                        "data": {
+                            "nickname": "inner",
+                            "user_id": "1002",
+                            "content": [
+                                {"type": "text", "data": {"text": "Nested text"}},
+                                {
+                                    "type": "image",
+                                    "data": {"file": "nested-image.png"},
+                                },
+                            ],
+                        },
+                    }
+                ]
+            },
+        },
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(
+        Forward(id="forward-deep-image"),
+        event=event,
+        analysis_service=analysis_service,
+    )
+
+    assert onebot_client.calls == ["forward-deep-image", "nested-forward"]
+    assert [(entry.depth, entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        (1, "inner", "1002", "Nested textImage analysis: Nested screenshot")
+    ]
+    assert analysis_service.calls == [
+        {
+            "unified_msg_origin": "umo",
+            "source_label": "forward:1:forward:forward-deep-image:0#0:forward:nested-forward:0#1",
+        }
+    ]
+    assert transcript.stats.total_nodes == 2
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.failed_forwards == 0
+    assert transcript.stats.filtered_nodes == 0
+
+
+def test_extract_filters_files_voice_and_video_but_keeps_text() -> None:
+    onebot_client = FakeOneBotClient(
+        response={
+            "message": [
+                {
+                    "type": "node",
+                    "data": {
+                        "nickname": "alice",
+                        "user_id": "1001",
+                        "content": [
+                            {"type": "text", "data": {"text": "Keep this"}},
+                            {"type": "file", "data": {"name": "archive.zip"}},
+                            {"type": "record", "data": {"file": "voice.amr"}},
+                            {"type": "video", "data": {"file": "clip.mp4"}},
+                        ],
+                    },
+                }
+            ]
+        }
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-filter-media"), event=event)
+
+    assert [(entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        ("alice", "1001", "Keep this")
+    ]
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.filtered_nodes == 3
+    assert transcript.stats.failed_forwards == 0
+
+
+def test_extract_raises_when_reference_contains_only_unsupported_media() -> None:
+    onebot_client = FakeOneBotClient(
+        response={
+            "message": [
+                {
+                    "type": "node",
+                    "data": {
+                        "nickname": "alice",
+                        "user_id": "1001",
+                        "content": [
+                            {"type": "file", "data": {"name": "archive.zip"}},
+                            {"type": "record", "data": {"file": "voice.amr"}},
+                            {"type": "video", "data": {"file": "clip.mp4"}},
+                        ],
+                    },
+                }
+            ]
+        }
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    with pytest.raises(ForwardTranscriptExtractionError) as exc_info:
+        _extract(Forward(id="forward-only-unsupported-media"), event=event)
+
+    assert str(exc_info.value) == "Merged forward transcript extraction produced no valid content."
+    stats = exc_info.value.stats
+    assert stats is not None
+    assert stats.filtered_nodes == 4
+    assert stats.kept_nodes == 0
+    assert stats.failed_forwards == 0
+
+
+def test_extract_keeps_mentions_faces_stickers_and_replies_in_reference() -> None:
+    onebot_client = FakeOneBotClient(
+        response={
+            "message": [
+                {
+                    "type": "node",
+                    "data": {
+                        "nickname": "alice",
+                        "user_id": "1001",
+                        "content": [
+                            {"type": "at", "data": {"qq": "12345"}},
+                            {"type": "face", "data": {"id": "66"}},
+                            {"type": "mface", "data": {"summary": "[funny sticker]"}},
+                            {"type": "reply", "data": {"id": "777"}},
+                        ],
+                    },
+                }
+            ]
+        }
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-key-context"), event=event)
+
+    assert [(entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        ("alice", "1001", "At: 12345Face emojiSticker: [funny sticker]Reply to 777")
+    ]
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.filtered_nodes == 0
+    assert transcript.stats.failed_forwards == 0
 
 
 def test_extract_expands_forward_reference_with_string_content() -> None:

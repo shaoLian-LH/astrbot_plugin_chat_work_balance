@@ -252,7 +252,7 @@ def test_on_message_success_path_includes_real_resolver_stage_logs(monkeypatch) 
         ),
     )
     _patch_runtime_loggers(plugin, monkeypatch, shared_logger)
-    image = Image(file_path="/tmp/desk.png")
+    image = Image(file="", file_path="/tmp/desk.png")
     event = FakeEvent([Plain("hello"), image, Plain(" world")], message_id="msg-real")
 
     results = run_async(collect_async(plugin.on_message(event)))

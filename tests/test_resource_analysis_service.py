@@ -37,7 +37,7 @@ def test_analyze_image_prefers_plugin_provider_over_global_default() -> None:
     try:
         result = run_async(
             service.analyze_image(
-                Image(file_path="/tmp/plugin.png"),
+                Image(file="", file_path="/tmp/plugin.png"),
                 unified_msg_origin="umo",
                 source_label="message:1#0",
             )
@@ -85,6 +85,7 @@ def test_analyze_image_uses_global_default_and_base64_fallback() -> None:
         result = run_async(
             service.analyze_image(
                 Image(
+                    file="",
                     file_path_error=RuntimeError("no file path"),
                     base64_data="YmFzZTY0LWltYWdl",
                 ),
@@ -132,7 +133,7 @@ def test_analyze_image_returns_failure_when_provider_call_raises() -> None:
     try:
         result = run_async(
             service.analyze_image(
-                Image(file_path="/tmp/failure.png"),
+                Image(file="", file_path="/tmp/failure.png"),
                 unified_msg_origin="umo",
                 source_label="message:1#2",
             )

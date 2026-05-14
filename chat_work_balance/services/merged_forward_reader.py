@@ -19,7 +19,6 @@ from astrbot.core.message.components import (
     Plain,
     Record,
     Reply,
-    Video,
 )
 
 from .resource_analysis_service import ResourceAnalysisService
@@ -28,7 +27,7 @@ from .resource_analysis_service import ResourceAnalysisService
 class ForwardTranscriptExtractionError(RuntimeError):
     """Raised when a merged forward message cannot produce any transcript entries."""
 
-    def __init__(self, message: str, *, stats: object | None = None) -> None:
+    def __init__(self, message: str, *, stats: "ForwardTranscriptStats | None" = None) -> None:
         super().__init__(message)
         self.stats = stats
 
@@ -509,6 +508,7 @@ class MergedForwardReader:
 
         normalized: list[BaseMessageComponent] = []
         filtered_count = 0
+        forward_node_id = self._extract_forward_data_id(data)
         content = data.get("content")
         if content is None:
             content = data.get("message")
@@ -522,6 +522,8 @@ class MergedForwardReader:
                 filtered_count += component_filtered_count
                 if normalized_component is not None:
                     normalized.append(normalized_component)
+        elif forward_node_id:
+            normalized.append(Forward(id=forward_node_id))
         else:
             return None, 1
 
@@ -571,23 +573,19 @@ class MergedForwardReader:
         if segment_type == "image":
             file = data.get("file")
             url = data.get("url")
-            return Image(url=str(url or file or "")), 0
-        if segment_type == "file":
-            return File(name=str(data.get("name", "")).strip()), 0
-        if segment_type == "record":
-            file = data.get("file")
-            url = data.get("url")
-            return Record(file=str(file or url or "")), 0
-        if segment_type == "video":
-            file = data.get("file")
-            url = data.get("url")
-            return Video(file=str(file or url or "")), 0
+            image_ref = str(url or file or "")
+            return Image(file=image_ref, url=str(url or "")), 0
+        if segment_type in {"file", "record", "video"}:
+            return None, 1
         if segment_type == "at":
             qq = data.get("qq")
             return At(qq=str(qq or "")), 0
         if segment_type == "face":
             face_id = data.get("id")
             return Face(id=str(face_id or "")), 0
+        if segment_type == "mface":
+            summary = str(data.get("summary") or data.get("emoji_id") or "").strip()
+            return Plain(f"Sticker: {summary}" if summary else "Sticker"), 0
         if segment_type == "reply":
             return Reply(id=str(data.get("id", "")).strip()), 0
         if segment_type == "forward":
@@ -595,8 +593,25 @@ class MergedForwardReader:
             normalized_id = str(forward_id or "").strip()
             return (Forward(id=normalized_id), 0) if normalized_id else (None, 1)
         if segment_type == "node":
-            return self._coerce_forward_node(item)
+            forward_id = self._extract_forward_data_id(data)
+            if forward_id and "content" not in data and "message" not in data:
+                return Forward(id=forward_id), 0
+            node, filtered_count = self._coerce_forward_node(item)
+            if node is not None:
+                return node, filtered_count
+            return (Forward(id=forward_id), filtered_count) if forward_id else (None, filtered_count + 1)
         return None, 1
+
+    @staticmethod
+    def _extract_forward_data_id(data: dict[object, object]) -> str:
+        for key in ("id", "forward_id", "message_id"):
+            value = data.get(key)
+            if value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized:
+                return normalized
+        return ""
 
     def _select_layer_nodes(
         self,
@@ -637,12 +652,8 @@ class MergedForwardReader:
                 source_label=source_label,
             )
             return analysis.text.strip()
-        if isinstance(component, File):
-            return f"File: {component.name or 'unnamed'}"
-        if isinstance(component, Record):
-            return "Voice message"
-        if isinstance(component, Video):
-            return "Video message"
+        if isinstance(component, (File, Record)):
+            return ""
         if isinstance(component, At):
             return f"At: {component.qq}"
         if isinstance(component, Face):
