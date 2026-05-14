@@ -64,6 +64,12 @@ class ForwardTranscript:
     stats: ForwardTranscriptStats
 
 
+@dataclass(frozen=True)
+class _ForwardNodeReference:
+    identifier: str
+    prefer_message_lookup: bool
+
+
 class MergedForwardReader:
     """Extract transcript text from merged-forward content with per-layer sampling."""
 
@@ -343,61 +349,25 @@ class MergedForwardReader:
         if response is None:
             return None
 
-        raw_messages = self._extract_forward_messages(response)
-        if raw_messages is None:
-            return None
-
-        nodes: list[Node] = []
-        filtered_count = 0
-        for item in raw_messages:
-            node, node_filtered_count = self._coerce_forward_node(item)
-            filtered_count += node_filtered_count
-            if node is None:
-                continue
-            nodes.append(node)
-        return nodes, filtered_count
+        return await self._coerce_response_nodes(response, event=event)
 
     async def _fetch_forward_response(self, bot: object, forward_id: str) -> object | None:
-        get_forward_msg = getattr(bot, "get_forward_msg", None)
-        if callable(get_forward_msg):
-            for kwargs in (
-                {},
-                {"id": forward_id},
-                {"message_id": forward_id},
-            ):
-                try:
-                    if kwargs:
-                        response = await cast(
-                            Callable[..., Awaitable[object]],
-                            get_forward_msg,
-                        )(**kwargs)
-                    else:
-                        response = await cast(
-                            Callable[[str], Awaitable[object]],
-                            get_forward_msg,
-                        )(forward_id)
-                except Exception:
-                    continue
-                if self._extract_forward_messages(response) is not None:
-                    return response
-
-        for call_action in self._iter_call_action_methods(bot):
-            for kwargs in (
+        response = await self._fetch_from_bound_method(
+            getattr(bot, "get_forward_msg", None),
+            forward_id,
+            ({}, {"id": forward_id}, {"message_id": forward_id}),
+        )
+        if response is not None:
+            return response
+        return await self._fetch_from_call_actions(
+            bot,
+            "get_forward_msg",
+            (
                 {"message_id": forward_id},
                 {"id": forward_id},
                 {"forward_id": forward_id},
-            ):
-                try:
-                    response = await cast(
-                        Callable[..., Awaitable[object]],
-                        call_action,
-                    )("get_forward_msg", **kwargs)
-                except Exception:
-                    continue
-                if self._extract_forward_messages(response) is not None:
-                    return response
-
-        return None
+            ),
+        )
 
     @staticmethod
     def _iter_call_action_methods(bot: object) -> Iterable[Callable[..., object]]:
@@ -409,6 +379,107 @@ class MergedForwardReader:
         api_call_action = getattr(api, "call_action", None)
         if callable(api_call_action):
             yield api_call_action
+
+    async def _resolve_message_reference_nodes(
+        self,
+        event: AstrMessageEvent | object | None,
+        message_id: str,
+    ) -> tuple[list[Node], int] | None:
+        bot = getattr(event, "bot", None)
+        if bot is None:
+            return None
+
+        response = await self._fetch_message_response(bot, message_id)
+        if response is None:
+            return None
+
+        return await self._coerce_response_nodes(
+            response,
+            event=event,
+            require_nodes=True,
+        )
+
+    async def _fetch_message_response(self, bot: object, message_id: str) -> object | None:
+        response = await self._fetch_from_bound_method(
+            getattr(bot, "get_msg", None),
+            message_id,
+            ({}, {"message_id": message_id}, {"id": message_id}),
+        )
+        if response is not None:
+            return response
+        return await self._fetch_from_call_actions(
+            bot,
+            "get_msg",
+            ({"message_id": message_id}, {"id": message_id}),
+        )
+
+    async def _coerce_response_nodes(
+        self,
+        response: object,
+        *,
+        event: AstrMessageEvent | object | None,
+        require_nodes: bool = False,
+    ) -> tuple[list[Node], int] | None:
+        raw_messages = self._extract_forward_messages(response)
+        if raw_messages is None:
+            return None
+
+        nodes: list[Node] = []
+        filtered_count = 0
+        for item in raw_messages:
+            coerced_nodes, node_filtered_count = await self._coerce_forward_nodes(
+                item,
+                event=event,
+            )
+            filtered_count += node_filtered_count
+            nodes.extend(coerced_nodes)
+        if require_nodes and not nodes:
+            return None
+        return nodes, filtered_count
+
+    async def _fetch_from_bound_method(
+        self,
+        method: object,
+        identifier: str,
+        kwargs_options: Sequence[dict[str, object]],
+    ) -> object | None:
+        if not callable(method):
+            return None
+
+        for kwargs in kwargs_options:
+            try:
+                if kwargs:
+                    response = await cast(Callable[..., Awaitable[object]], method)(
+                        **kwargs
+                    )
+                else:
+                    response = await cast(Callable[[str], Awaitable[object]], method)(
+                        identifier
+                    )
+            except Exception:
+                continue
+            if self._extract_forward_messages(response) is not None:
+                return response
+        return None
+
+    async def _fetch_from_call_actions(
+        self,
+        bot: object,
+        action: str,
+        kwargs_options: Sequence[dict[str, object]],
+    ) -> object | None:
+        for call_action in self._iter_call_action_methods(bot):
+            for kwargs in kwargs_options:
+                try:
+                    response = await cast(Callable[..., Awaitable[object]], call_action)(
+                        action,
+                        **kwargs,
+                    )
+                except Exception:
+                    continue
+                if self._extract_forward_messages(response) is not None:
+                    return response
+        return None
 
     def _extract_forward_messages(self, response: object) -> Sequence[object] | None:
         direct_messages = self._normalize_message_sequence(response)
@@ -484,16 +555,21 @@ class MergedForwardReader:
 
         return ""
 
-    def _coerce_forward_node(self, item: object) -> tuple[Node | None, int]:
+    async def _coerce_forward_nodes(
+        self,
+        item: object,
+        *,
+        event: AstrMessageEvent | object | None,
+    ) -> tuple[list[Node], int]:
         if isinstance(item, Node):
-            return item, 0
+            return [item], 0
 
         if not isinstance(item, dict):
-            return None, 1
+            return [], 1
 
         segment_type = item.get("type")
         if isinstance(segment_type, str) and segment_type.strip() and segment_type != "node":
-            return None, 1
+            return [], 1
 
         data: dict[object, object] | None = None
         if segment_type == "node":
@@ -504,59 +580,92 @@ class MergedForwardReader:
             data = item
 
         if not isinstance(data, dict):
-            return None, 1
+            return [], 1
 
         normalized: list[BaseMessageComponent] = []
         filtered_count = 0
-        forward_node_id = self._extract_forward_data_id(data)
+        node_reference = self._extract_forward_node_reference(data)
         content = data.get("content")
         if content is None:
             content = data.get("message")
-        if forward_node_id and self._is_reference_only_node(data):
-            normalized.append(Forward(id=forward_node_id))
+        if node_reference and self._is_reference_only_node(data):
+            reference_nodes = await self._append_node_reference(
+                normalized,
+                node_reference=node_reference,
+                event=event,
+            )
+            if reference_nodes is not None:
+                return reference_nodes
         elif isinstance(content, str):
             normalized.append(Plain(content))
         elif isinstance(content, list):
             for component in content:
-                normalized_component, component_filtered_count = self._coerce_forward_component(
-                    component
+                normalized_component, component_filtered_count = await self._coerce_forward_component(
+                    component,
+                    event=event,
                 )
                 filtered_count += component_filtered_count
                 if normalized_component is not None:
                     normalized.append(normalized_component)
-        elif forward_node_id:
-            normalized.append(Forward(id=forward_node_id))
+        elif node_reference:
+            reference_nodes = await self._append_node_reference(
+                normalized,
+                node_reference=node_reference,
+                event=event,
+            )
+            if reference_nodes is not None:
+                return reference_nodes
         else:
-            return None, 1
+            return [], 1
 
         if not normalized:
-            return None, filtered_count + 1
+            return [], filtered_count + 1
 
         sender = data.get("sender")
         sender_data = sender if isinstance(sender, dict) else {}
         return (
-            Node(
-                name=self._normalize_sender_name(
-                    data.get("nickname")
-                    or data.get("name")
-                    or sender_data.get("nickname")
-                    or sender_data.get("card")
-                    or sender_data.get("name")
+            [
+                Node(
+                    name=self._normalize_sender_name(
+                        data.get("nickname")
+                        or data.get("name")
+                        or sender_data.get("nickname")
+                        or sender_data.get("card")
+                        or sender_data.get("name")
+                    ),
+                    uin=self._normalize_sender_id(
+                        data.get("user_id")
+                        or data.get("uin")
+                        or sender_data.get("user_id")
+                        or sender_data.get("uin")
+                    ),
+                    content=normalized,
                 ),
-                uin=self._normalize_sender_id(
-                    data.get("user_id")
-                    or data.get("uin")
-                    or sender_data.get("user_id")
-                    or sender_data.get("uin")
-                ),
-                content=normalized,
-            ),
+            ],
             filtered_count,
         )
 
-    def _coerce_forward_component(
+    async def _append_node_reference(
+        self,
+        normalized: list[BaseMessageComponent],
+        *,
+        node_reference: _ForwardNodeReference,
+        event: AstrMessageEvent | object | None,
+    ) -> tuple[list[Node], int] | None:
+        reference_component, filtered_count = await self._coerce_node_reference(
+            node_reference=node_reference,
+            event=event,
+        )
+        if isinstance(reference_component, Nodes):
+            return reference_component.nodes, filtered_count
+        normalized.append(reference_component)
+        return None
+
+    async def _coerce_forward_component(
         self,
         item: object,
+        *,
+        event: AstrMessageEvent | object | None,
     ) -> tuple[BaseMessageComponent | None, int]:
         if isinstance(item, BaseMessageComponent):
             return item, 0
@@ -595,14 +704,47 @@ class MergedForwardReader:
             normalized_id = str(forward_id or "").strip()
             return (Forward(id=normalized_id), 0) if normalized_id else (None, 1)
         if segment_type == "node":
-            forward_id = self._extract_forward_data_id(data)
-            if forward_id and self._is_reference_only_node(data):
-                return Forward(id=forward_id), 0
-            node, filtered_count = self._coerce_forward_node(item)
-            if node is not None:
-                return node, filtered_count
-            return (Forward(id=forward_id), filtered_count) if forward_id else (None, filtered_count + 1)
+            node_reference = self._extract_forward_node_reference(data)
+            if node_reference and self._is_reference_only_node(data):
+                reference_component, reference_filtered_count = await self._coerce_node_reference(
+                    node_reference=node_reference,
+                    event=event,
+                )
+                return reference_component, reference_filtered_count
+            nodes, filtered_count = await self._coerce_forward_nodes(
+                item,
+                event=event,
+            )
+            if len(nodes) == 1:
+                return nodes[0], filtered_count
+            if nodes:
+                return Nodes(nodes=nodes), filtered_count
+            return (
+                (Forward(id=node_reference.identifier), filtered_count)
+                if node_reference
+                else (None, filtered_count + 1)
+            )
         return None, 1
+
+    async def _coerce_node_reference(
+        self,
+        *,
+        node_reference: _ForwardNodeReference,
+        event: AstrMessageEvent | object | None,
+    ) -> tuple[BaseMessageComponent, int]:
+        if not node_reference.prefer_message_lookup:
+            return Forward(id=node_reference.identifier), 0
+
+        resolved_nodes = await self._resolve_message_reference_nodes(
+            event,
+            node_reference.identifier,
+        )
+        if resolved_nodes is None:
+            return Forward(id=node_reference.identifier), 0
+        nodes, filtered_count = resolved_nodes
+        if nodes:
+            filtered_count -= len(nodes)
+        return Nodes(nodes=nodes), max(filtered_count, 0)
 
     @staticmethod
     def _is_reference_only_node(data: dict[object, object]) -> bool:
@@ -619,14 +761,30 @@ class MergedForwardReader:
         )
 
     @staticmethod
-    def _extract_forward_data_id(data: dict[object, object]) -> str:
-        for key in ("id", "forward_id", "message_id", "resid"):
+    def _extract_forward_node_reference(
+        data: dict[object, object],
+    ) -> _ForwardNodeReference | None:
+        for key in ("id", "message_id"):
             value = data.get(key)
             if value is None:
                 continue
             normalized = str(value).strip()
             if normalized:
-                return normalized
+                return _ForwardNodeReference(
+                    identifier=normalized,
+                    prefer_message_lookup=True,
+                )
+
+        for key in ("forward_id", "resid"):
+            value = data.get(key)
+            if value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized:
+                return _ForwardNodeReference(
+                    identifier=normalized,
+                    prefer_message_lookup=False,
+                )
 
         for key in ("content", "message"):
             value = data.get(key)
@@ -634,8 +792,11 @@ class MergedForwardReader:
                 continue
             normalized = value.strip()
             if normalized:
-                return normalized
-        return ""
+                return _ForwardNodeReference(
+                    identifier=normalized,
+                    prefer_message_lookup=False,
+                )
+        return None
 
     def _select_layer_nodes(
         self,

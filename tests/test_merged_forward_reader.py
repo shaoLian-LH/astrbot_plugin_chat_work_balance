@@ -50,12 +50,19 @@ class FakeOneBotClient:
         response: Mapping[str, object] | None = None,
         *,
         responses: Mapping[str, Mapping[str, object]] | None = None,
+        message_responses: Mapping[str, Mapping[str, object]] | None = None,
         error: Exception | None = None,
     ) -> None:
         self.response = dict(response or {"message": []})
         self.responses = {key: dict(value) for key, value in (responses or {}).items()}
+        self.message_responses = (
+            {key: dict(value) for key, value in message_responses.items()}
+            if message_responses is not None
+            else None
+        )
         self.error = error
         self.calls: list[str] = []
+        self.message_calls: list[str] = []
 
     async def get_forward_msg(self, forward_id: str) -> dict[str, object]:
         self.calls.append(forward_id)
@@ -64,6 +71,16 @@ class FakeOneBotClient:
         if forward_id in self.responses:
             return self.responses[forward_id]
         return self.response
+
+    async def get_msg(self, message_id: str) -> dict[str, object]:
+        self.message_calls.append(message_id)
+        if self.error is not None:
+            raise self.error
+        if self.message_responses is None:
+            raise RuntimeError("get_msg unavailable")
+        if message_id in self.message_responses:
+            return self.message_responses[message_id]
+        return {"message": []}
 
 
 class FakeOneBotActionClient:
@@ -404,6 +421,57 @@ def test_extract_expands_nested_forward_reference_with_image_analysis() -> None:
             "unified_msg_origin": "umo",
             "source_label": "forward:1:forward:forward-deep-image:0#0:forward:nested-forward:0#1",
         }
+    ]
+    assert transcript.stats.total_nodes == 2
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.failed_forwards == 0
+    assert transcript.stats.filtered_nodes == 0
+
+
+def test_extract_expands_deep_node_id_reference_via_message_lookup() -> None:
+    outer_response = {
+        "message": [
+            {
+                "type": "node",
+                "data": {
+                    "nickname": "outer",
+                    "user_id": "1001",
+                    "content": [
+                        {
+                            "type": "node",
+                            "data": {"id": "1048114836"},
+                        },
+                    ],
+                },
+            }
+        ]
+    }
+    onebot_client = FakeOneBotClient(
+        response=outer_response,
+        responses={"forward-with-reference": outer_response},
+        message_responses={
+            "1048114836": {
+                "message": [
+                    {
+                        "type": "text",
+                        "data": {"text": "爸爸的爸爸叫爷爷"},
+                    }
+                ],
+                "sender": {
+                    "nickname": "小高",
+                    "user_id": "869246700",
+                },
+            },
+        },
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-with-reference"), event=event)
+
+    assert onebot_client.calls == ["forward-with-reference"]
+    assert onebot_client.message_calls == ["1048114836"]
+    assert [(entry.depth, entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        (1, "小高", "869246700", "爸爸的爸爸叫爷爷")
     ]
     assert transcript.stats.total_nodes == 2
     assert transcript.stats.kept_nodes == 1
