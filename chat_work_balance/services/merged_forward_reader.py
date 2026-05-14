@@ -371,19 +371,21 @@ class MergedForwardReader:
         if not isinstance(data, dict):
             return None, 1
 
-        content = data.get("content")
-        if not isinstance(content, list):
-            return None, 1
-
         normalized: list[BaseMessageComponent] = []
         filtered_count = 0
-        for component in content:
-            normalized_component, component_filtered_count = self._coerce_forward_component(
-                component
-            )
-            filtered_count += component_filtered_count
-            if normalized_component is not None:
-                normalized.append(normalized_component)
+        content = data.get("content")
+        if isinstance(content, str):
+            normalized.append(Plain(content))
+        elif isinstance(content, list):
+            for component in content:
+                normalized_component, component_filtered_count = self._coerce_forward_component(
+                    component
+                )
+                filtered_count += component_filtered_count
+                if normalized_component is not None:
+                    normalized.append(normalized_component)
+        else:
+            return None, 1
 
         if not normalized:
             return None, filtered_count + 1

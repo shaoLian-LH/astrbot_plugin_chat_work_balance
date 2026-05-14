@@ -273,6 +273,34 @@ def test_extract_expands_forward_reference_and_collects_image_analysis() -> None
     assert transcript.stats.filtered_nodes == 0
 
 
+def test_extract_expands_forward_reference_with_string_content() -> None:
+    onebot_client = FakeOneBotClient(
+        response={
+            "message": [
+                {
+                    "type": "node",
+                    "data": {
+                        "nickname": "alice",
+                        "user_id": "1001",
+                        "content": "Status update from string payload",
+                    },
+                }
+            ]
+        }
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-string"), event=event)
+
+    assert onebot_client.calls == ["forward-string"]
+    assert [(entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        ("alice", "1001", "Status update from string payload")
+    ]
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.filtered_nodes == 0
+    assert transcript.stats.failed_forwards == 0
+
+
 def test_extract_counts_filtered_onebot_items_during_normalization() -> None:
     onebot_client = FakeOneBotClient(
         response={
