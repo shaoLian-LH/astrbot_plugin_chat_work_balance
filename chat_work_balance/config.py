@@ -83,10 +83,7 @@ class ChatWorkBalanceConfig:
             return self.message_resolve_provider_id
 
         provider_settings = self.get_provider_settings(global_config)
-        provider_id = provider_settings.get(
-            "default_message_resolve_provider_id",
-            provider_settings.get("default_provider_id", ""),
-        )
+        provider_id = provider_settings.get("default_message_resolve_provider_id", "")
         return self._normalize_str(provider_id)
 
     def resolve_prompt(

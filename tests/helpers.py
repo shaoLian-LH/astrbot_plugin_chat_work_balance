@@ -20,13 +20,22 @@ class FakeProvider(Provider):
         *,
         completion_text: str = "A generated caption",
         error: Exception | None = None,
+        outcomes: list[object] | None = None,
     ) -> None:
         self.completion_text = completion_text
         self.error = error
+        self.outcomes = list(outcomes) if outcomes is not None else None
         self.calls: list[dict[str, object]] = []
 
     async def text_chat(self, prompt: str, image_urls: list[str]) -> FakeProviderResponse:
         self.calls.append({"prompt": prompt, "image_urls": list(image_urls)})
+        if self.outcomes is not None:
+            if not self.outcomes:
+                raise AssertionError("FakeProvider outcomes exhausted")
+            next_outcome = self.outcomes.pop(0)
+            if isinstance(next_outcome, Exception):
+                raise next_outcome
+            return FakeProviderResponse(str(next_outcome))
         if self.error is not None:
             raise self.error
         return FakeProviderResponse(self.completion_text)
