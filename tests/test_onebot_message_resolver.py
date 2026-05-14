@@ -567,7 +567,7 @@ def test_resolve_forward_summary_log_summary_does_not_leak_transcript_or_summary
     assert "Summary keeps key quote" not in resolved.log_summary
 
 
-def test_resolve_forward_extraction_error_bubbles_up_without_calling_summary_service() -> None:
+def test_resolve_forward_extraction_error_replays_failure_text_without_summary_call() -> None:
     resolver, _, forward_reader, forward_summary_service = _build_resolver(
         analysis_results=[],
         forward_error=ForwardTranscriptExtractionError(
@@ -575,13 +575,35 @@ def test_resolve_forward_extraction_error_bubbles_up_without_calling_summary_ser
         ),
     )
     event = FakeEvent([Forward(id="forward-1")], message_id="msg-forward-empty")
+    log_recorder = types.SimpleNamespace(info=[], warning=[])
+    from chat_work_balance.resolvers import onebot_message_resolver as resolver_module
 
+    original_logger = resolver_module.logger
+    resolver_module.logger = types.SimpleNamespace(
+        info=lambda message: log_recorder.info.append(message),
+        warning=lambda message: log_recorder.warning.append(message),
+    )
     try:
-        run_async(resolver.resolve(event))
-    except ForwardTranscriptExtractionError as exc:
-        assert str(exc) == "Merged forward transcript extraction produced no valid content."
-    else:
-        raise AssertionError("Expected ForwardTranscriptExtractionError")
+        resolved = run_async(resolver.resolve(event))
+    finally:
+        resolver_module.logger = original_logger
 
     assert forward_reader.calls == ["forward:msg-forward-empty#0"]
     assert forward_summary_service.calls == []
+    assert [segment.kind for segment in resolved.segments] == ["forward_summary"]
+    assert resolved.replay_plan.chunks[0].intent == "text"
+    assert resolved.replay_plan.chunks[0].summary == "Merged forward parsing failed: no readable content."
+    assert resolved.segments[0].metadata == {
+        "provider_id": "",
+        "success": "false",
+        "transcript_length": "0",
+        "summary_length": "51",
+    }
+    assert any(
+        "stage=forward_transcript_failed" in message
+        and "error_type=ForwardTranscriptExtractionError" in message
+        and "source_index=0" in message
+        and "component_kind=Forward" in message
+        for message in log_recorder.warning
+    )
+    assert not any("stage=forward_summary_completed" in message for message in log_recorder.info)

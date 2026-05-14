@@ -301,6 +301,75 @@ def test_extract_expands_forward_reference_with_string_content() -> None:
     assert transcript.stats.failed_forwards == 0
 
 
+def test_extract_expands_forward_reference_from_data_messages_with_sender() -> None:
+    onebot_client = FakeOneBotClient(
+        response={
+            "data": {
+                "messages": [
+                    {
+                        "content": [
+                            {"type": "text", "data": {"text": "Status from real payload"}}
+                        ],
+                        "sender": {
+                            "nickname": "alice",
+                            "user_id": 1001,
+                        },
+                    }
+                ]
+            }
+        }
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-data-messages"), event=event)
+
+    assert onebot_client.calls == ["forward-data-messages"]
+    assert [(entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        ("alice", "1001", "Status from real payload")
+    ]
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.filtered_nodes == 0
+    assert transcript.stats.failed_forwards == 0
+
+
+def test_extract_expands_forward_reference_from_top_level_messages() -> None:
+    onebot_client = FakeOneBotClient(
+        response={
+            "messages": [
+                {
+                    "content": "Status from top-level messages",
+                    "sender": {
+                        "card": "team lead",
+                        "uin": "1002",
+                    },
+                }
+            ]
+        }
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-top-messages"), event=event)
+
+    assert onebot_client.calls == ["forward-top-messages"]
+    assert [(entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        ("team lead", "1002", "Status from top-level messages")
+    ]
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.filtered_nodes == 0
+    assert transcript.stats.failed_forwards == 0
+
+
+def test_extract_rejects_string_message_collection_without_iterating_characters() -> None:
+    onebot_client = FakeOneBotClient(response={"message": "not-a-message-list"})
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    with pytest.raises(ForwardTranscriptExtractionError) as exc_info:
+        _extract(Forward(id="forward-string-collection"), event=event)
+
+    assert str(exc_info.value) == "Merged forward transcript extraction produced no valid content."
+    assert onebot_client.calls == ["forward-string-collection"]
+
+
 def test_extract_counts_filtered_onebot_items_during_normalization() -> None:
     onebot_client = FakeOneBotClient(
         response={

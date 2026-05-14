@@ -17,7 +17,6 @@ from chat_work_balance.config import ChatWorkBalanceConfig
 from chat_work_balance.models import ReplayChunk, ReplayPlan, ResolvedMessage
 from chat_work_balance.resolvers.onebot_message_resolver import OneBotMessageResolver
 from chat_work_balance.services.forward_summary_service import ForwardSummaryService
-from chat_work_balance.services.merged_forward_reader import ForwardTranscriptExtractionError
 from chat_work_balance.services.merged_forward_reader import MergedForwardReader
 from chat_work_balance.services.resource_analysis_service import (
     ResourceAnalysisResult,
@@ -490,7 +489,7 @@ def test_on_message_forward_summary_replays_private_chain_when_provider_returns_
     )
 
 
-def test_on_message_returns_short_error_when_forward_transcript_is_empty(monkeypatch) -> None:
+def test_on_message_replays_forward_failure_text_when_transcript_is_empty(monkeypatch) -> None:
     log_recorder = types.SimpleNamespace(info=[], warning=[], exception=[])
     shared_logger = types.SimpleNamespace(
         info=lambda message: log_recorder.info.append(message),
@@ -512,14 +511,24 @@ def test_on_message_returns_short_error_when_forward_transcript_is_empty(monkeyp
     results = run_async(collect_async(plugin.on_message(event)))
 
     assert results == [
-        {"type": "plain", "text": "Message resolver is temporarily unavailable."}
+        {"type": "chain", "chain": [Plain("Merged forward parsing failed: no readable content.")]}
     ]
-    assert event.plain_calls == ["Message resolver is temporarily unavailable."]
+    assert event.chain_calls == [[Plain("Merged forward parsing failed: no readable content.")]]
+    assert event.plain_calls == []
     assert event.stopped == 1
     assert any("stage=forward_summary_started" in message for message in log_recorder.info)
-    assert len(log_recorder.exception) == 1
-    assert "stage=message_failed" in log_recorder.exception[0]
-    assert "error_type=ForwardTranscriptExtractionError" in log_recorder.exception[0]
+    assert any(
+        "stage=forward_transcript_failed" in message
+        and "error_type=ForwardTranscriptExtractionError" in message
+        for message in log_recorder.warning
+    )
+    assert any(
+        "stage=message_completed" in message
+        and "message_id=msg-forward-empty-main" in message
+        and "chunk_count=1" in message
+        for message in log_recorder.info
+    )
+    assert log_recorder.exception == []
 
 
 def test_on_message_private_success_path_replays_chunks_and_uses_private_origin(monkeypatch) -> None:

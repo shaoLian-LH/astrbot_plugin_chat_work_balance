@@ -342,8 +342,8 @@ class MergedForwardReader:
         except Exception:
             return None
 
-        raw_messages = response.get("message") if isinstance(response, dict) else None
-        if not isinstance(raw_messages, Sequence):
+        raw_messages = self._extract_forward_messages(response)
+        if raw_messages is None:
             return None
 
         nodes: list[Node] = []
@@ -356,6 +356,31 @@ class MergedForwardReader:
             nodes.append(node)
         return nodes, filtered_count
 
+    def _extract_forward_messages(self, response: object) -> Sequence[object] | None:
+        if not isinstance(response, dict):
+            return None
+
+        data = response.get("data")
+        if isinstance(data, dict):
+            data_messages = self._normalize_message_sequence(data.get("messages"))
+            if data_messages is not None:
+                return data_messages
+
+        for key in ("messages", "message"):
+            messages = self._normalize_message_sequence(response.get(key))
+            if messages is not None:
+                return messages
+
+        return None
+
+    @staticmethod
+    def _normalize_message_sequence(value: object) -> Sequence[object] | None:
+        if isinstance(value, (str, bytes, bytearray)):
+            return None
+        if isinstance(value, Sequence):
+            return value
+        return None
+
     def _coerce_forward_node(self, item: object) -> tuple[Node | None, int]:
         if isinstance(item, Node):
             return item, 0
@@ -367,7 +392,14 @@ class MergedForwardReader:
         if isinstance(segment_type, str) and segment_type.strip() and segment_type != "node":
             return None, 1
 
-        data = item.get("data")
+        data: dict[object, object] | None = None
+        if segment_type == "node":
+            raw_data = item.get("data")
+            if isinstance(raw_data, dict):
+                data = raw_data
+        elif "content" in item:
+            data = item
+
         if not isinstance(data, dict):
             return None, 1
 
@@ -390,10 +422,23 @@ class MergedForwardReader:
         if not normalized:
             return None, filtered_count + 1
 
+        sender = data.get("sender")
+        sender_data = sender if isinstance(sender, dict) else {}
         return (
             Node(
-                name=self._normalize_sender_name(data.get("nickname") or data.get("name")),
-                uin=self._normalize_sender_id(data.get("user_id") or data.get("uin")),
+                name=self._normalize_sender_name(
+                    data.get("nickname")
+                    or data.get("name")
+                    or sender_data.get("nickname")
+                    or sender_data.get("card")
+                    or sender_data.get("name")
+                ),
+                uin=self._normalize_sender_id(
+                    data.get("user_id")
+                    or data.get("uin")
+                    or sender_data.get("user_id")
+                    or sender_data.get("uin")
+                ),
                 content=normalized,
             ),
             filtered_count,

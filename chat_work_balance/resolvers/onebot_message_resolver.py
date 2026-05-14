@@ -24,6 +24,7 @@ from astrbot.core.message.components import (
 from ..models import ReplayChunk, ReplayPlan, ResolvedMessage, ResolvedSegment
 from ..services.forward_summary_service import ForwardSummaryResult, ForwardSummaryService
 from ..services.merged_forward_reader import (
+    ForwardTranscriptExtractionError,
     ForwardLayerNote,
     ForwardTranscriptEntry,
     MergedForwardReader,
@@ -31,6 +32,7 @@ from ..services.merged_forward_reader import (
 from ..services.resource_analysis_service import ResourceAnalysisService
 
 _PLUGIN_NAME = "chat_work_balance"
+_FORWARD_TRANSCRIPT_FAILURE_TEXT = "Merged forward parsing failed: no readable content."
 
 
 class OneBotMessageResolver:
@@ -275,13 +277,38 @@ class OneBotMessageResolver:
                         component_kind=type(component).__name__,
                     )
                 )
-                transcript = await self._merged_forward_reader.extract(
-                    component,
-                    event=event,
-                    resource_analysis_service=self._resource_analysis_service,
-                    unified_msg_origin=event.unified_msg_origin,
-                    source_label=f"forward:{getattr(message_obj, 'message_id', 'unknown')}#{index}",
-                )
+                try:
+                    transcript = await self._merged_forward_reader.extract(
+                        component,
+                        event=event,
+                        resource_analysis_service=self._resource_analysis_service,
+                        unified_msg_origin=event.unified_msg_origin,
+                        source_label=f"forward:{getattr(message_obj, 'message_id', 'unknown')}#{index}",
+                    )
+                except ForwardTranscriptExtractionError as exc:
+                    logger.warning(
+                        self._format_observable_log(
+                            "forward_transcript_failed",
+                            unified_msg_origin=unified_msg_origin,
+                            message_id=message_id,
+                            platform=platform,
+                            source_index=str(index),
+                            component_kind=type(component).__name__,
+                            error_type=type(exc).__name__,
+                        )
+                    )
+                    segments.append(
+                        ResolvedSegment(
+                            kind="forward_summary",
+                            summary=_FORWARD_TRANSCRIPT_FAILURE_TEXT,
+                            payload=component,
+                            source_index=index,
+                            replayable=True,
+                            metadata=self._build_forward_failure_metadata(),
+                        )
+                    )
+                    append_text_chunk(_FORWARD_TRANSCRIPT_FAILURE_TEXT, source_index=index)
+                    continue
                 transcript_text = "\n".join(
                     self._format_transcript_entry(entry)
                     for entry in transcript.entries
@@ -475,6 +502,15 @@ class OneBotMessageResolver:
             "success": str(summary_result.success).lower(),
             "transcript_length": str(len(transcript)),
             "summary_length": str(len(summary_result.text)),
+        }
+
+    @staticmethod
+    def _build_forward_failure_metadata() -> dict[str, str]:
+        return {
+            "provider_id": "",
+            "success": "false",
+            "transcript_length": "0",
+            "summary_length": str(len(_FORWARD_TRANSCRIPT_FAILURE_TEXT)),
         }
 
     @staticmethod
