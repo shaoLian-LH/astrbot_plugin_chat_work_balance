@@ -13,3 +13,6 @@
 - Integrated forward transcript extraction and summary service into the OneBot resolver and plugin entrypoint, with end-to-end replay and error-path tests.
 - Redacted forward-summary runtime logs so transcript text and LLM summary bodies no longer leak through provider, resolver, or replay-stage logging.
 - Added OneBot `get_forward_msg` response-shape compatibility for real `messages` payloads, direct `call_action` adapters, and empty forward references.
+
+### Fixed
+- Fixed nested merged-forward parsing for OneBot forward segments that carry inline `data.content` nodes.

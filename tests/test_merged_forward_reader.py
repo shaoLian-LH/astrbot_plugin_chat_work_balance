@@ -428,6 +428,205 @@ def test_extract_expands_nested_forward_reference_with_image_analysis() -> None:
     assert transcript.stats.filtered_nodes == 0
 
 
+def test_extract_expands_nested_forward_inline_content_without_refetch() -> None:
+    outer_response = {
+        "message": [
+            {
+                "type": "node",
+                "data": {
+                    "nickname": "outer",
+                    "user_id": "1001",
+                    "content": [
+                        {
+                            "type": "forward",
+                            "data": {
+                                "id": "nested-inline-forward",
+                                "content": [
+                                    {
+                                        "type": "node",
+                                        "data": {
+                                            "nickname": "inner",
+                                            "user_id": "1002",
+                                            "content": [
+                                                {
+                                                    "type": "text",
+                                                    "data": {"text": "Inline nested text"},
+                                                }
+                                            ],
+                                        },
+                                    }
+                                ],
+                            },
+                        },
+                    ],
+                },
+            }
+        ]
+    }
+    onebot_client = FakeOneBotClient(
+        response=outer_response,
+        responses={"forward-inline": outer_response},
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-inline"), event=event)
+
+    assert onebot_client.calls == ["forward-inline"]
+    assert [(entry.depth, entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        (1, "inner", "1002", "Inline nested text")
+    ]
+    assert transcript.stats.total_nodes == 2
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.failed_forwards == 0
+    assert transcript.stats.filtered_nodes == 0
+
+
+def test_extract_expands_forward_response_from_data_content() -> None:
+    onebot_client = FakeOneBotClient(
+        response={
+            "data": {
+                "content": [
+                    {
+                        "type": "node",
+                        "data": {
+                            "nickname": "alice",
+                            "user_id": "1001",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "data": {"text": "Status from data.content"},
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+        }
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-data-content"), event=event)
+
+    assert onebot_client.calls == ["forward-data-content"]
+    assert [(entry.depth, entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        (0, "alice", "1001", "Status from data.content")
+    ]
+    assert transcript.stats.total_nodes == 1
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.failed_forwards == 0
+    assert transcript.stats.filtered_nodes == 0
+
+
+def test_extract_refetches_nested_forward_when_inline_content_is_unreadable() -> None:
+    outer_response = {
+        "message": [
+            {
+                "type": "node",
+                "data": {
+                    "nickname": "outer",
+                    "user_id": "1001",
+                    "content": [
+                        {
+                            "type": "forward",
+                            "data": {
+                                "id": "nested-refetch-forward",
+                                "content": [
+                                    {"type": "file", "data": {"name": "archive.zip"}}
+                                ],
+                            },
+                        },
+                    ],
+                },
+            }
+        ]
+    }
+    onebot_client = FakeOneBotClient(
+        response=outer_response,
+        responses={
+            "forward-refetch": outer_response,
+            "nested-refetch-forward": {
+                "message": [
+                    {
+                        "type": "node",
+                        "data": {
+                            "nickname": "inner",
+                            "user_id": "1002",
+                            "content": "Refetched nested text",
+                        },
+                    }
+                ]
+            },
+        },
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-refetch"), event=event)
+
+    assert onebot_client.calls == ["forward-refetch", "nested-refetch-forward"]
+    assert [(entry.depth, entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        (1, "inner", "1002", "Refetched nested text")
+    ]
+    assert transcript.stats.total_nodes == 2
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.failed_forwards == 0
+    assert transcript.stats.filtered_nodes == 0
+
+
+@pytest.mark.parametrize("reference_key", ["forward_id", "message_id", "resid"])
+def test_extract_expands_nested_forward_reference_from_forward_segment_id_keys(
+    reference_key: str,
+) -> None:
+    outer_id = f"forward-{reference_key}"
+    outer_response = {
+        "message": [
+            {
+                "type": "node",
+                "data": {
+                    "nickname": "outer",
+                    "user_id": "1001",
+                    "content": [
+                        {
+                            "type": "forward",
+                            "data": {reference_key: "nested-forward-key"},
+                        },
+                    ],
+                },
+            }
+        ]
+    }
+    onebot_client = FakeOneBotClient(
+        response=outer_response,
+        responses={
+            outer_id: outer_response,
+            "nested-forward-key": {
+                "message": [
+                    {
+                        "type": "node",
+                        "data": {
+                            "nickname": "inner",
+                            "user_id": "1002",
+                            "content": "Nested text from forward segment key",
+                        },
+                    }
+                ]
+            },
+        },
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id=outer_id), event=event)
+
+    assert onebot_client.calls == [outer_id, "nested-forward-key"]
+    assert onebot_client.message_calls == []
+    assert [(entry.depth, entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        (1, "inner", "1002", "Nested text from forward segment key")
+    ]
+    assert transcript.stats.total_nodes == 2
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.failed_forwards == 0
+    assert transcript.stats.filtered_nodes == 0
+
+
 def test_extract_expands_deep_node_id_reference_via_message_lookup() -> None:
     outer_response = {
         "message": [

@@ -494,6 +494,11 @@ class MergedForwardReader:
         if data_sequence is not None:
             return data_sequence
         if isinstance(data, dict):
+            data_content_messages = self._normalize_forward_node_sequence(
+                data.get("content")
+            )
+            if data_content_messages is not None:
+                return data_content_messages
             if self._looks_like_forward_node(data):
                 return [data]
             for key in ("messages", "message"):
@@ -501,9 +506,14 @@ class MergedForwardReader:
                 if data_messages is not None:
                     return data_messages
 
+        response_content_messages = self._normalize_forward_node_sequence(
+            response.get("content")
+        )
+        if response_content_messages is not None:
+            return response_content_messages
         if self._looks_like_forward_node(response):
             return [response]
-        for key in ("messages", "message"):
+        for key in ("messages", "message", "content"):
             messages = self._normalize_message_sequence(response.get(key))
             if messages is not None:
                 return messages
@@ -516,6 +526,16 @@ class MergedForwardReader:
             return None
         if isinstance(value, Sequence):
             return value
+        return None
+
+    def _normalize_forward_node_sequence(self, value: object) -> Sequence[object] | None:
+        sequence = self._normalize_message_sequence(value)
+        if sequence is None:
+            return None
+        if not sequence:
+            return sequence
+        if any(isinstance(item, Node) or self._looks_like_forward_node(item) for item in sequence):
+            return sequence
         return None
 
     @staticmethod
@@ -700,9 +720,18 @@ class MergedForwardReader:
         if segment_type == "reply":
             return Reply(id=str(data.get("id", "")).strip()), 0
         if segment_type == "forward":
-            forward_id = data.get("id")
-            normalized_id = str(forward_id or "").strip()
-            return (Forward(id=normalized_id), 0) if normalized_id else (None, 1)
+            inline_component, inline_filtered_count = await self._coerce_inline_forward(
+                data,
+                event=event,
+            )
+            if inline_component is not None:
+                return inline_component, inline_filtered_count
+            forward_id = self._extract_forward_segment_id(data)
+            return (
+                (Forward(id=forward_id), 0)
+                if forward_id
+                else (None, inline_filtered_count + 1)
+            )
         if segment_type == "node":
             node_reference = self._extract_forward_node_reference(data)
             if node_reference and self._is_reference_only_node(data):
@@ -726,6 +755,29 @@ class MergedForwardReader:
             )
         return None, 1
 
+    async def _coerce_inline_forward(
+        self,
+        data: dict[object, object],
+        *,
+        event: AstrMessageEvent | object | None,
+    ) -> tuple[BaseMessageComponent | None, int]:
+        raw_messages = self._extract_forward_messages(data)
+        if raw_messages is None:
+            return None, 0
+
+        nodes: list[Node] = []
+        filtered_count = 0
+        for item in raw_messages:
+            coerced_nodes, node_filtered_count = await self._coerce_forward_nodes(
+                item,
+                event=event,
+            )
+            filtered_count += node_filtered_count
+            nodes.extend(coerced_nodes)
+        if nodes:
+            return Nodes(nodes=nodes), filtered_count
+        return None, filtered_count
+
     async def _coerce_node_reference(
         self,
         *,
@@ -745,6 +797,17 @@ class MergedForwardReader:
         if nodes:
             filtered_count -= len(nodes)
         return Nodes(nodes=nodes), max(filtered_count, 0)
+
+    @staticmethod
+    def _extract_forward_segment_id(data: dict[object, object]) -> str:
+        for key in ("id", "forward_id", "message_id", "resid"):
+            value = data.get(key)
+            if value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized:
+                return normalized
+        return ""
 
     @staticmethod
     def _is_reference_only_node(data: dict[object, object]) -> bool:
