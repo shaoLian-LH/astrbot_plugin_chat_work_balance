@@ -512,7 +512,9 @@ class MergedForwardReader:
         content = data.get("content")
         if content is None:
             content = data.get("message")
-        if isinstance(content, str):
+        if forward_node_id and self._is_reference_only_node(data):
+            normalized.append(Forward(id=forward_node_id))
+        elif isinstance(content, str):
             normalized.append(Plain(content))
         elif isinstance(content, list):
             for component in content:
@@ -594,7 +596,7 @@ class MergedForwardReader:
             return (Forward(id=normalized_id), 0) if normalized_id else (None, 1)
         if segment_type == "node":
             forward_id = self._extract_forward_data_id(data)
-            if forward_id and "content" not in data and "message" not in data:
+            if forward_id and self._is_reference_only_node(data):
                 return Forward(id=forward_id), 0
             node, filtered_count = self._coerce_forward_node(item)
             if node is not None:
@@ -603,12 +605,34 @@ class MergedForwardReader:
         return None, 1
 
     @staticmethod
+    def _is_reference_only_node(data: dict[object, object]) -> bool:
+        has_sender_context = any(
+            key in data
+            for key in ("sender", "user_id", "uin", "nickname", "name")
+        )
+        if has_sender_context:
+            return False
+        content = data.get("content")
+        message = data.get("message")
+        return isinstance(content, str) or isinstance(message, str) or (
+            content is None and message is None
+        )
+
+    @staticmethod
     def _extract_forward_data_id(data: dict[object, object]) -> str:
-        for key in ("id", "forward_id", "message_id"):
+        for key in ("id", "forward_id", "message_id", "resid"):
             value = data.get(key)
             if value is None:
                 continue
             normalized = str(value).strip()
+            if normalized:
+                return normalized
+
+        for key in ("content", "message"):
+            value = data.get(key)
+            if not isinstance(value, str):
+                continue
+            normalized = value.strip()
             if normalized:
                 return normalized
         return ""

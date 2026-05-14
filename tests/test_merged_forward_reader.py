@@ -411,6 +411,106 @@ def test_extract_expands_nested_forward_reference_with_image_analysis() -> None:
     assert transcript.stats.filtered_nodes == 0
 
 
+def test_extract_expands_nested_forward_reference_from_node_string_content_id() -> None:
+    outer_response = {
+        "message": [
+            {
+                "type": "node",
+                "data": {
+                    "nickname": "outer",
+                    "user_id": "1001",
+                    "content": [
+                        {
+                            "type": "node",
+                            "data": {"content": "nested-forward-string-id"},
+                        },
+                    ],
+                },
+            }
+        ]
+    }
+    onebot_client = FakeOneBotClient(
+        response=outer_response,
+        responses={
+            "forward-string-id": outer_response,
+            "nested-forward-string-id": {
+                "message": [
+                    {
+                        "type": "node",
+                        "data": {
+                            "nickname": "inner",
+                            "user_id": "1002",
+                            "content": "Nested text from string content id",
+                        },
+                    }
+                ]
+            },
+        },
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-string-id"), event=event)
+
+    assert onebot_client.calls == ["forward-string-id", "nested-forward-string-id"]
+    assert [(entry.depth, entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        (1, "inner", "1002", "Nested text from string content id")
+    ]
+    assert transcript.stats.total_nodes == 2
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.failed_forwards == 0
+    assert transcript.stats.filtered_nodes == 0
+
+
+def test_extract_expands_nested_forward_reference_from_node_resid() -> None:
+    outer_response = {
+        "message": [
+            {
+                "type": "node",
+                "data": {
+                    "nickname": "outer",
+                    "user_id": "1001",
+                    "content": [
+                        {
+                            "type": "node",
+                            "data": {"resid": "nested-forward-resid"},
+                        },
+                    ],
+                },
+            }
+        ]
+    }
+    onebot_client = FakeOneBotClient(
+        response=outer_response,
+        responses={
+            "forward-resid": outer_response,
+            "nested-forward-resid": {
+                "message": [
+                    {
+                        "type": "node",
+                        "data": {
+                            "nickname": "inner",
+                            "user_id": "1002",
+                            "content": "Nested text from resid",
+                        },
+                    }
+                ]
+            },
+        },
+    )
+    event = FakeEvent([], onebot_client=onebot_client)
+
+    transcript = _extract(Forward(id="forward-resid"), event=event)
+
+    assert onebot_client.calls == ["forward-resid", "nested-forward-resid"]
+    assert [(entry.depth, entry.sender_name, entry.sender_id, entry.text) for entry in transcript.entries] == [
+        (1, "inner", "1002", "Nested text from resid")
+    ]
+    assert transcript.stats.total_nodes == 2
+    assert transcript.stats.kept_nodes == 1
+    assert transcript.stats.failed_forwards == 0
+    assert transcript.stats.filtered_nodes == 0
+
+
 def test_extract_filters_files_voice_and_video_but_keeps_text() -> None:
     onebot_client = FakeOneBotClient(
         response={
