@@ -1,18 +1,13 @@
 from __future__ import annotations
 
+from .forward_summary_service import ForwardSummaryResult, ForwardSummaryService
+from .merged_forward_reader import MergedForwardReader
+from .resource_analysis_service import ResourceAnalysisResult, ResourceAnalysisService
 
-class ResourceAnalysisService:
-    """Slice A only assembles dependencies; runtime behavior lands in Slice B."""
-
-    def __init__(self, context, plugin_config) -> None:
-        self._context = context
-        self._plugin_config = plugin_config
-
-
-class MergedForwardReader:
-    """Slice A only assembles dependencies; runtime behavior lands in Slice B."""
-
-    pass
-
-
-__all__ = ["MergedForwardReader", "ResourceAnalysisService"]
+__all__ = [
+    "ForwardSummaryResult",
+    "ForwardSummaryService",
+    "MergedForwardReader",
+    "ResourceAnalysisResult",
+    "ResourceAnalysisService",
+]

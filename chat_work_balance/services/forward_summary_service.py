@@ -6,11 +6,11 @@ from dataclasses import dataclass
 
 from astrbot.api import logger
 from astrbot.api.star import Context
-from astrbot.core.provider.provider import Provider
 
 from ..config import ChatWorkBalanceConfig
+from ..observability import format_source_observable_log, shorten_text
+from .provider_utils import extract_completion_text, lookup_chat_provider
 
-_PLUGIN_NAME = "chat_work_balance"
 _MAX_PROVIDER_ATTEMPTS = 3
 _FORWARD_SUMMARY_PROMPT = """你正在为合并转发消息生成可直接回放的中文个人总结。
 
@@ -55,39 +55,29 @@ class ForwardSummaryService:
         provider_id = self._plugin_config.resolve_message_provider_id(global_config)
         prompt = self._build_prompt(transcript)
 
-        if not provider_id:
+        provider_lookup = lookup_chat_provider(
+            self._context,
+            provider_id,
+            not_configured_detail="转发总结失败：未配置消息解析模型。",
+            not_found_detail=f"转发总结失败：找不到消息解析模型 {provider_id}。",
+            invalid_type_detail=f"转发总结失败：消息解析模型 {provider_id} 不是文本对话 provider。",
+        )
+        if provider_lookup.provider is None:
             return self._configuration_failure(
-                detail="转发总结失败：未配置消息解析模型。",
-                provider_id="",
-                prompt=prompt,
-                source_label=source_label,
-                unified_msg_origin=unified_msg_origin,
-            )
-
-        provider = self._context.get_provider_by_id(provider_id)
-        if provider is None:
-            return self._configuration_failure(
-                detail=f"转发总结失败：找不到消息解析模型 {provider_id}。",
+                detail=provider_lookup.failure_detail,
                 provider_id=provider_id,
                 prompt=prompt,
                 source_label=source_label,
                 unified_msg_origin=unified_msg_origin,
             )
-        if not isinstance(provider, Provider):
-            return self._configuration_failure(
-                detail=f"转发总结失败：消息解析模型 {provider_id} 不是文本对话 provider。",
-                provider_id=provider_id,
-                prompt=prompt,
-                source_label=source_label,
-                unified_msg_origin=unified_msg_origin,
-            )
+        provider = provider_lookup.provider
 
         for attempt in range(1, _MAX_PROVIDER_ATTEMPTS + 1):
             try:
                 response = await provider.text_chat(prompt=prompt, image_urls=[])
             except Exception as exc:
                 logger.warning(
-                    self._format_observable_log(
+                    format_source_observable_log(
                         "provider_retry",
                         unified_msg_origin=unified_msg_origin,
                         source_label=source_label,
@@ -100,10 +90,10 @@ class ForwardSummaryService:
                 )
                 continue
 
-            completion_text = (getattr(response, "completion_text", "") or "").strip()
+            completion_text = extract_completion_text(response)
             if not completion_text:
                 logger.warning(
-                    self._format_observable_log(
+                    format_source_observable_log(
                         "provider_retry",
                         unified_msg_origin=unified_msg_origin,
                         source_label=source_label,
@@ -116,7 +106,7 @@ class ForwardSummaryService:
                 continue
 
             logger.info(
-                self._format_observable_log(
+                format_source_observable_log(
                     "provider_succeeded",
                     unified_msg_origin=unified_msg_origin,
                     source_label=source_label,
@@ -155,13 +145,13 @@ class ForwardSummaryService:
         unified_msg_origin: str,
     ) -> ForwardSummaryResult:
         logger.warning(
-            self._format_observable_log(
+            format_source_observable_log(
                 "provider_configuration_error",
                 unified_msg_origin=unified_msg_origin,
                 source_label=source_label,
                 provider_id=provider_id or "<none>",
                 call_result="configuration_error",
-                detail=self._shorten(detail),
+                detail=shorten_text(detail, 180),
             )
         )
         return ForwardSummaryResult(
@@ -182,13 +172,13 @@ class ForwardSummaryService:
         unified_msg_origin: str,
     ) -> ForwardSummaryResult:
         logger.warning(
-            self._format_observable_log(
+            format_source_observable_log(
                 "message_failed",
                 unified_msg_origin=unified_msg_origin,
                 source_label=source_label,
                 provider_id=provider_id,
                 failure_stage="provider_call",
-                detail=self._shorten(detail),
+                detail=shorten_text(detail, 180),
             )
         )
         return ForwardSummaryResult(
@@ -198,48 +188,3 @@ class ForwardSummaryService:
             text=detail,
             detail=detail,
         )
-
-    @staticmethod
-    def _shorten(text: str, limit: int = 180) -> str:
-        compact = " ".join(text.split())
-        if len(compact) <= limit:
-            return compact
-        return f"{compact[: limit - 3]}..."
-
-    @staticmethod
-    def _format_observable_log(
-        stage: str,
-        *,
-        unified_msg_origin: str,
-        source_label: str,
-        provider_id: str,
-        **fields: str,
-    ) -> str:
-        parts = [
-            f"plugin={_PLUGIN_NAME}",
-            f"stage={stage}",
-            f"platform={ForwardSummaryService._resolve_platform(unified_msg_origin)}",
-            f"unified_msg_origin={unified_msg_origin}",
-            f"message_id={ForwardSummaryService._extract_message_id(source_label)}",
-            f"source_label={source_label}",
-            f"provider_id={provider_id}",
-        ]
-        for key, value in fields.items():
-            parts.append(f"{key}={value}")
-        return " ".join(parts)
-
-    @staticmethod
-    def _resolve_platform(unified_msg_origin: str) -> str:
-        if not unified_msg_origin:
-            return "<unknown>"
-        return unified_msg_origin.split(":", 1)[0] or "<unknown>"
-
-    @staticmethod
-    def _extract_message_id(source_label: str) -> str:
-        if source_label.startswith("message:"):
-            message_part = source_label.split(":", 1)[1]
-            return message_part.split("#", 1)[0] or "<unknown>"
-        if source_label.startswith("forward:"):
-            message_part = source_label.split(":", 1)[1]
-            return message_part.split("#", 1)[0] or "<unknown>"
-        return "<unknown>"

@@ -21,6 +21,7 @@ from astrbot.core.message.components import (
     Reply,
 )
 
+from .forward_transcript_format import format_transcript_text
 from .resource_analysis_service import ResourceAnalysisService
 
 
@@ -140,12 +141,7 @@ class MergedForwardReader:
             unified_msg_origin=unified_msg_origin,
             source_label=source_label,
         )
-        lines = [
-            self._format_entry(entry)
-            for entry in transcript.entries
-        ]
-        lines.extend(note.text for note in transcript.notes)
-        return "\n".join(line for line in lines if line).strip()
+        return format_transcript_text(transcript.entries, transcript.notes)
 
     async def _append_component(
         self,
@@ -909,13 +905,6 @@ class MergedForwardReader:
         if isinstance(component, Reply):
             return f"Reply to {component.id}"
         return ""
-
-    @staticmethod
-    def _format_entry(entry: ForwardTranscriptEntry) -> str:
-        sender = entry.sender_name
-        if entry.sender_id:
-            sender = f"{sender}({entry.sender_id})"
-        return f"{'  ' * entry.depth}{sender}: {entry.text}"
 
     @staticmethod
     def _normalize_sender_name(value: object) -> str:

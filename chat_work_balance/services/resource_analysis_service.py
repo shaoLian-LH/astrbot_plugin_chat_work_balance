@@ -7,11 +7,10 @@ from dataclasses import dataclass
 from astrbot.api import logger
 from astrbot.api.star import Context
 from astrbot.core.message.components import Image
-from astrbot.core.provider.provider import Provider
 
 from ..config import ChatWorkBalanceConfig
-
-_PLUGIN_NAME = "chat_work_balance"
+from ..observability import format_source_observable_log, shorten_text
+from .provider_utils import extract_completion_text, lookup_chat_provider
 
 
 @dataclass(frozen=True)
@@ -43,35 +42,23 @@ class ResourceAnalysisService:
         if not prompt:
             prompt = "Describe this image briefly for message replay."
 
-        if not provider_id:
+        provider_lookup = lookup_chat_provider(
+            self._context,
+            provider_id,
+            not_configured_detail="Image analysis skipped: no provider configured.",
+            not_found_detail=f"Image analysis skipped: provider '{provider_id}' was not found.",
+            invalid_type_detail=f"Image analysis skipped: provider '{provider_id}' is not a chat provider.",
+        )
+        if provider_lookup.provider is None:
             return self._failure(
                 "provider_selection",
-                "Image analysis skipped: no provider configured.",
-                provider_id="",
-                prompt=prompt,
-                source_label=source_label,
-                unified_msg_origin=unified_msg_origin,
-            )
-
-        provider = self._context.get_provider_by_id(provider_id)
-        if provider is None:
-            return self._failure(
-                "provider_selection",
-                f"Image analysis skipped: provider '{provider_id}' was not found.",
+                provider_lookup.failure_detail,
                 provider_id=provider_id,
                 prompt=prompt,
                 source_label=source_label,
                 unified_msg_origin=unified_msg_origin,
             )
-        if not isinstance(provider, Provider):
-            return self._failure(
-                "provider_selection",
-                f"Image analysis skipped: provider '{provider_id}' is not a chat provider.",
-                provider_id=provider_id,
-                prompt=prompt,
-                source_label=source_label,
-                unified_msg_origin=unified_msg_origin,
-            )
+        provider = provider_lookup.provider
 
         try:
             image_ref = await self._normalize_image(image)
@@ -99,7 +86,7 @@ class ResourceAnalysisService:
                 error_type=type(exc).__name__,
             )
 
-        completion_text = (getattr(response, "completion_text", "") or "").strip()
+        completion_text = extract_completion_text(response)
         if not completion_text:
             return self._failure(
                 "provider_call",
@@ -112,12 +99,12 @@ class ResourceAnalysisService:
 
         summary_text = f"Image analysis: {completion_text}"
         logger.info(
-            self._format_observable_log(
+            format_source_observable_log(
                 "provider_succeeded",
                 unified_msg_origin=unified_msg_origin,
                 source_label=source_label,
                 provider_id=provider_id,
-                detail=self._shorten(completion_text),
+                detail=shorten_text(completion_text, 180),
             )
         )
         return ResourceAnalysisResult(
@@ -148,14 +135,14 @@ class ResourceAnalysisService:
         error_type: str = "",
     ) -> ResourceAnalysisResult:
         logger.warning(
-            self._format_observable_log(
+            format_source_observable_log(
                 "message_failed",
                 unified_msg_origin=unified_msg_origin,
                 source_label=source_label,
                 provider_id=provider_id or "<none>",
                 failure_stage=stage,
                 error_type=error_type or "<none>",
-                detail=self._shorten(detail),
+                detail=shorten_text(detail, 180),
             )
         )
         return ResourceAnalysisResult(
@@ -165,48 +152,3 @@ class ResourceAnalysisService:
             text=detail,
             detail=detail,
         )
-
-    @staticmethod
-    def _shorten(text: str, limit: int = 180) -> str:
-        compact = " ".join(text.split())
-        if len(compact) <= limit:
-            return compact
-        return f"{compact[: limit - 3]}..."
-
-    @staticmethod
-    def _format_observable_log(
-        stage: str,
-        *,
-        unified_msg_origin: str,
-        source_label: str,
-        provider_id: str,
-        **fields: str,
-    ) -> str:
-        parts = [
-            f"plugin={_PLUGIN_NAME}",
-            f"stage={stage}",
-            f"platform={ResourceAnalysisService._resolve_platform(unified_msg_origin)}",
-            f"unified_msg_origin={unified_msg_origin}",
-            f"message_id={ResourceAnalysisService._extract_message_id(source_label)}",
-            f"source_label={source_label}",
-            f"provider_id={provider_id}",
-        ]
-        for key, value in fields.items():
-            parts.append(f"{key}={value}")
-        return " ".join(parts)
-
-    @staticmethod
-    def _resolve_platform(unified_msg_origin: str) -> str:
-        if not unified_msg_origin:
-            return "<unknown>"
-        return unified_msg_origin.split(":", 1)[0] or "<unknown>"
-
-    @staticmethod
-    def _extract_message_id(source_label: str) -> str:
-        if source_label.startswith("message:"):
-            message_part = source_label.split(":", 1)[1]
-            return message_part.split("#", 1)[0] or "<unknown>"
-        if source_label.startswith("forward:"):
-            message_part = source_label.split(":", 1)[1]
-            return message_part.split("#", 1)[0] or "<unknown>"
-        return "<unknown>"

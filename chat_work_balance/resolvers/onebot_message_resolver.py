@@ -22,16 +22,16 @@ from astrbot.core.message.components import (
 )
 
 from ..models import ReplayChunk, ReplayPlan, ResolvedMessage, ResolvedSegment
+from ..observability import format_observable_log, resolve_platform, shorten_text
 from ..services.forward_summary_service import ForwardSummaryResult, ForwardSummaryService
+from ..services.forward_transcript_format import format_transcript_text
 from ..services.merged_forward_reader import (
     ForwardTranscriptExtractionError,
     ForwardLayerNote,
-    ForwardTranscriptEntry,
     MergedForwardReader,
 )
 from ..services.resource_analysis_service import ResourceAnalysisService
 
-_PLUGIN_NAME = "chat_work_balance"
 _FORWARD_TRANSCRIPT_FAILURE_TEXT = "Merged forward parsing failed: no readable content."
 
 
@@ -52,51 +52,10 @@ class OneBotMessageResolver:
         message_obj = getattr(event, "message_obj", None)
         message_id = str(getattr(message_obj, "message_id", "")) or "<unknown>"
         unified_msg_origin = str(getattr(event, "unified_msg_origin", "")) or "<unknown>"
-        platform = self._resolve_platform(unified_msg_origin)
+        platform = resolve_platform(unified_msg_origin)
         message_chain = getattr(message_obj, "message", None) or []
         segments: list[ResolvedSegment] = []
-        chunks: list[ReplayChunk] = []
-        dropped_segments: list[ResolvedSegment] = []
-
-        text_buffer: list[Plain] = []
-        text_indexes: list[int] = []
-
-        async def flush_text_buffer() -> None:
-            nonlocal text_buffer, text_indexes
-            if not text_buffer:
-                return
-            chunks.append(
-                ReplayChunk(
-                    chain=list(text_buffer),
-                    intent="text",
-                    source_indexes=tuple(text_indexes),
-                    summary=self._join_plain_text(text_buffer),
-                )
-            )
-            text_buffer = []
-            text_indexes = []
-
-        def append_text_chunk(text: str, *, source_index: int) -> None:
-            if not text:
-                return
-            text_buffer.append(Plain(text))
-            text_indexes.append(source_index)
-
-        def append_media_chunk(
-            component: BaseMessageComponent,
-            *,
-            intent: Literal["image", "file", "record", "video"],
-            source_index: int,
-            summary: str,
-        ) -> None:
-            chunks.append(
-                ReplayChunk(
-                    chain=[component],
-                    intent=intent,
-                    source_indexes=(source_index,),
-                    summary=summary,
-                )
-            )
+        replay_builder = _ReplayPlanBuilder()
 
         for index, component in enumerate(message_chain):
             if isinstance(component, Plain):
@@ -110,11 +69,11 @@ class OneBotMessageResolver:
                         replayable=True,
                     )
                 )
-                append_text_chunk(text, source_index=index)
+                replay_builder.append_text(text, source_index=index)
                 continue
 
             if isinstance(component, Image):
-                await flush_text_buffer()
+                replay_builder.flush_text()
                 image_summary = self._describe_image(component)
                 segments.append(
                     ResolvedSegment(
@@ -125,7 +84,7 @@ class OneBotMessageResolver:
                         replayable=True,
                     )
                 )
-                append_media_chunk(
+                replay_builder.append_media(
                     component,
                     intent="image",
                     source_index=index,
@@ -148,11 +107,11 @@ class OneBotMessageResolver:
                     },
                 )
                 segments.append(analysis_segment)
-                append_text_chunk(analysis.text, source_index=index)
+                replay_builder.append_text(analysis.text, source_index=index)
                 continue
 
             if isinstance(component, File):
-                await flush_text_buffer()
+                replay_builder.flush_text()
                 replay_file, summary, metadata = await self._prepare_file_component(component)
                 segments.append(
                     ResolvedSegment(
@@ -164,7 +123,7 @@ class OneBotMessageResolver:
                         metadata=metadata,
                     )
                 )
-                append_media_chunk(
+                replay_builder.append_media(
                     replay_file,
                     intent="file",
                     source_index=index,
@@ -173,7 +132,7 @@ class OneBotMessageResolver:
                 continue
 
             if isinstance(component, Record):
-                await flush_text_buffer()
+                replay_builder.flush_text()
                 summary = "Voice message"
                 segments.append(
                     ResolvedSegment(
@@ -184,7 +143,7 @@ class OneBotMessageResolver:
                         replayable=True,
                     )
                 )
-                append_media_chunk(
+                replay_builder.append_media(
                     component,
                     intent="record",
                     source_index=index,
@@ -193,7 +152,7 @@ class OneBotMessageResolver:
                 continue
 
             if isinstance(component, Video):
-                await flush_text_buffer()
+                replay_builder.flush_text()
                 summary = "Video message"
                 segments.append(
                     ResolvedSegment(
@@ -204,7 +163,7 @@ class OneBotMessageResolver:
                         replayable=True,
                     )
                 )
-                append_media_chunk(
+                replay_builder.append_media(
                     component,
                     intent="video",
                     source_index=index,
@@ -221,7 +180,7 @@ class OneBotMessageResolver:
                     replayable=False,
                 )
                 segments.append(segment)
-                dropped_segments.append(segment)
+                replay_builder.append_dropped(segment)
                 self._log_dropped_segment(
                     unified_msg_origin=unified_msg_origin,
                     message_id=message_id,
@@ -239,7 +198,7 @@ class OneBotMessageResolver:
                     replayable=False,
                 )
                 segments.append(segment)
-                dropped_segments.append(segment)
+                replay_builder.append_dropped(segment)
                 self._log_dropped_segment(
                     unified_msg_origin=unified_msg_origin,
                     message_id=message_id,
@@ -257,7 +216,7 @@ class OneBotMessageResolver:
                     replayable=False,
                 )
                 segments.append(segment)
-                dropped_segments.append(segment)
+                replay_builder.append_dropped(segment)
                 self._log_dropped_segment(
                     unified_msg_origin=unified_msg_origin,
                     message_id=message_id,
@@ -268,7 +227,7 @@ class OneBotMessageResolver:
 
             if isinstance(component, (Forward, Node, Nodes)):
                 logger.info(
-                    self._format_observable_log(
+                    format_observable_log(
                         "forward_summary_started",
                         unified_msg_origin=unified_msg_origin,
                         message_id=message_id,
@@ -288,7 +247,7 @@ class OneBotMessageResolver:
                 except ForwardTranscriptExtractionError as exc:
                     stats = getattr(exc, "stats", None)
                     logger.warning(
-                        self._format_observable_log(
+                        format_observable_log(
                             "forward_transcript_failed",
                             unified_msg_origin=unified_msg_origin,
                             message_id=message_id,
@@ -312,18 +271,17 @@ class OneBotMessageResolver:
                             metadata=self._build_forward_failure_metadata(),
                         )
                     )
-                    append_text_chunk(_FORWARD_TRANSCRIPT_FAILURE_TEXT, source_index=index)
+                    replay_builder.append_text(
+                        _FORWARD_TRANSCRIPT_FAILURE_TEXT,
+                        source_index=index,
+                    )
                     continue
-                transcript_text = "\n".join(
-                    self._format_transcript_entry(entry)
-                    for entry in transcript.entries
+                transcript_text = format_transcript_text(
+                    transcript.entries,
+                    transcript.notes,
                 )
-                if transcript.notes:
-                    transcript_text = "\n".join(
-                        [transcript_text, *(note.text for note in transcript.notes)]
-                    ).strip()
                 logger.info(
-                    self._format_observable_log(
+                    format_observable_log(
                         "forward_transcript_extracted",
                         unified_msg_origin=unified_msg_origin,
                         message_id=message_id,
@@ -345,7 +303,7 @@ class OneBotMessageResolver:
                     source_label=f"forward:{getattr(message_obj, 'message_id', 'unknown')}#{index}",
                 )
                 logger.info(
-                    self._format_observable_log(
+                    format_observable_log(
                         "forward_summary_completed",
                         unified_msg_origin=unified_msg_origin,
                         message_id=message_id,
@@ -367,7 +325,7 @@ class OneBotMessageResolver:
                         metadata=self._build_forward_summary_metadata(transcript_text, summary_result),
                     )
                 )
-                append_text_chunk(summary_result.text, source_index=index)
+                replay_builder.append_text(summary_result.text, source_index=index)
                 continue
 
             segment = ResolvedSegment(
@@ -378,7 +336,7 @@ class OneBotMessageResolver:
                 replayable=False,
             )
             segments.append(segment)
-            dropped_segments.append(segment)
+            replay_builder.append_dropped(segment)
             self._log_dropped_segment(
                 unified_msg_origin=unified_msg_origin,
                 message_id=message_id,
@@ -386,11 +344,10 @@ class OneBotMessageResolver:
                 segment=segment,
             )
 
-        await flush_text_buffer()
+        replay_plan = replay_builder.build()
 
-        replay_plan = ReplayPlan(chunks=chunks, dropped_segments=dropped_segments)
         logger.info(
-            self._format_observable_log(
+            format_observable_log(
                 "message_resolved",
                 unified_msg_origin=unified_msg_origin,
                 message_id=message_id,
@@ -467,8 +424,8 @@ class OneBotMessageResolver:
             and segment.metadata.get("success") == "false"
         ]
         return (
-            f"plugin={_PLUGIN_NAME} stage=message_resolved_summary "
-            f"platform={self._resolve_platform(event.unified_msg_origin)} "
+            "plugin=chat_work_balance stage=message_resolved_summary "
+            f"platform={resolve_platform(event.unified_msg_origin)} "
             f"unified_msg_origin={event.unified_msg_origin} "
             f"message_id={message_id or '<unknown>'} "
             f"components={component_names} "
@@ -529,17 +486,6 @@ class OneBotMessageResolver:
         return "Image resource"
 
     @staticmethod
-    def _join_plain_text(components: list[Plain]) -> str:
-        return "".join(component.text for component in components)
-
-    @staticmethod
-    def _format_transcript_entry(entry: ForwardTranscriptEntry) -> str:
-        sender = entry.sender_name
-        if entry.sender_id:
-            sender = f"{sender}({entry.sender_id})"
-        return f"{'  ' * entry.depth}{sender}: {entry.text}"
-
-    @staticmethod
     def _format_sample_note_depths(notes: tuple[ForwardLayerNote, ...]) -> str:
         if not notes:
             return "<none>"
@@ -571,46 +517,71 @@ class OneBotMessageResolver:
         segment: ResolvedSegment,
     ) -> None:
         logger.warning(
-            self._format_observable_log(
+            format_observable_log(
                 "dropped_segment",
                 unified_msg_origin=unified_msg_origin,
                 message_id=message_id,
                 platform=platform,
                 segment_kind=segment.kind,
                 source_index=str(segment.source_index),
-                detail=self._shorten(segment.summary),
+                detail=shorten_text(segment.summary, 160),
             )
         )
 
-    @staticmethod
-    def _format_observable_log(
-        stage: str,
+
+class _ReplayPlanBuilder:
+    def __init__(self) -> None:
+        self._chunks: list[ReplayChunk] = []
+        self._dropped_segments: list[ResolvedSegment] = []
+        self._text_buffer: list[Plain] = []
+        self._text_indexes: list[int] = []
+
+    def append_text(self, text: str, *, source_index: int) -> None:
+        if not text:
+            return
+        self._text_buffer.append(Plain(text))
+        self._text_indexes.append(source_index)
+
+    def append_media(
+        self,
+        component: BaseMessageComponent,
         *,
-        unified_msg_origin: str,
-        message_id: str,
-        platform: str,
-        **fields: str,
-    ) -> str:
-        parts = [
-            f"plugin={_PLUGIN_NAME}",
-            f"stage={stage}",
-            f"platform={platform}",
-            f"unified_msg_origin={unified_msg_origin}",
-            f"message_id={message_id}",
-        ]
-        for key, value in fields.items():
-            parts.append(f"{key}={value}")
-        return " ".join(parts)
+        intent: Literal["image", "file", "record", "video"],
+        source_index: int,
+        summary: str,
+    ) -> None:
+        self._chunks.append(
+            ReplayChunk(
+                chain=[component],
+                intent=intent,
+                source_indexes=(source_index,),
+                summary=summary,
+            )
+        )
 
-    @staticmethod
-    def _resolve_platform(unified_msg_origin: str) -> str:
-        if not unified_msg_origin:
-            return "<unknown>"
-        return unified_msg_origin.split(":", 1)[0] or "<unknown>"
+    def append_dropped(self, segment: ResolvedSegment) -> None:
+        self._dropped_segments.append(segment)
 
-    @staticmethod
-    def _shorten(text: str, limit: int = 160) -> str:
-        compact = " ".join(text.split())
-        if len(compact) <= limit:
-            return compact
-        return f"{compact[: limit - 3]}..."
+    def build(self) -> ReplayPlan:
+        self.flush_text()
+        return ReplayPlan(
+            chunks=self._chunks,
+            dropped_segments=self._dropped_segments,
+        )
+
+    def flush_text(self) -> None:
+        if not self._text_buffer:
+            return
+        self._chunks.append(
+            ReplayChunk(
+                chain=list(self._text_buffer),
+                intent="text",
+                source_indexes=tuple(self._text_indexes),
+                summary=self._join_plain_text(),
+            )
+        )
+        self._text_buffer = []
+        self._text_indexes = []
+
+    def _join_plain_text(self) -> str:
+        return "".join(component.text for component in self._text_buffer)
